@@ -7,7 +7,7 @@ from _thread import start_new_thread
 from datetime import timedelta
 from sys import stdout
 from time import sleep, time_ns
-from typing import TYPE_CHECKING, Optional, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from numpy import random
 
@@ -84,6 +84,7 @@ class Timeline:
         if type(event.process.owner) is str:
             event.process.owner = self.get_entity_by_name(event.process.owner)
         self.schedule_counter += 1
+        event.process.number = self.schedule_counter
         self.events.push(event)
 
     def init(self) -> None:
@@ -117,7 +118,6 @@ class Timeline:
                 continue
 
             self.time = event.time
-            
             log.logger.debug(f"Event #{self.run_counter}: process owner={event.process.owner}, activation={event.process.activation}")
             event.process.run()
             self.run_counter += 1
@@ -180,7 +180,7 @@ class Timeline:
 
             print(f'{process_bar}', end=CARRIAGE_RETURN)
             stdout.flush()
-            sleep(seconds=3)
+            sleep(3)
 
     @staticmethod
     def ns_to_human_time(nanoseconds: float) -> str:

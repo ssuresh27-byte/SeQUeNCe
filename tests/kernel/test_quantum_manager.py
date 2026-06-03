@@ -1,8 +1,10 @@
 import numpy as np
 from scipy.linalg import fractional_matrix_power
 import math
+from math import sqrt
+from numpy import array, eye
 
-from sequence.kernel.quantum_manager import *
+from sequence.kernel.quantum_manager import QuantumManagerDensity, QuantumManagerDensityFock, QuantumManagerKet
 from sequence.components.circuit import Circuit
 
 
@@ -81,6 +83,8 @@ def test_qmanager_circuit():
     assert np.all(qm.get(key1).state == qm.get(key2).state)
     assert np.all(qm.get(key1).state == np.array([1, 0, 0, 0]))
     assert qm.get(key1).keys == [key2, key1]
+    # get the state with ascending order of keys
+    assert qm.get_ascending_keys(key1).keys == sorted([key2, key1])
 
     # single state in multi-qubit system
     key1 = qm.new()
@@ -147,6 +151,8 @@ def test_qmanager_circuit_density():
     assert qm.get(key1) is qm.get(key2)
     assert np.array_equal(qm.get(key1).state, desired_state)
     assert qm.get(key1).keys == [key2, key1]
+    # get the state with ascending order of keys
+    assert qm.get_ascending_keys(key1).keys == sorted([key2, key1])
 
     # single state in multi-qubit system
     key1 = qm.new()

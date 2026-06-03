@@ -16,25 +16,31 @@ class Protocol(ABC):
     """Abstract protocol class for code running on network nodes.
 
     Attributes:
-        own (Node): node protocol is attached to.
+        owner (Node): node protocol is attached to.
         name (str): label for protocol instance.
+        protocol_type (str): type of protocol instance (e.g. 'single_heralded').
     """
 
-    def __init__(self, owner: "Node", name: str):
+    def __init__(self, owner: "Node", name: str, protocol_type: str = ""):
         """Constructor for protocol.
 
         Args:
             owner (Node): node protocol is attached to.
             name (str): name of protocol instance.
+            protocol_type (str): type of protocol instance.
         """
 
         self.owner = owner
         self.name = name
+        self.protocol_type = protocol_type
 
     @abstractmethod
     def received_message(self, src: str, msg: "Message"):
         """Receive classical message from another node."""
 
+        pass
+
+    def init(self):
         pass
 
     def __str__(self) -> str:
@@ -47,7 +53,7 @@ class StackProtocol(Protocol):
     Adds interfaces for push and pop functions.
 
     Attributes:
-        own (Node): node protocol is attached to.
+        owner (Node): node protocol is attached to.
         name (str): label for protocol instance.
         upper_protocols (list[StackProtocol]): Protocols to pop to.
         lower_protocols (list[StackProtocol]): Protocols to push to.
@@ -57,7 +63,7 @@ class StackProtocol(Protocol):
         """Constructor for stack protocol class.
 
         Args:
-            own (Node): node protocol is attached to.
+            owner (Node): node protocol is attached to.
             name (str): name of protocol instance.
         """
 
@@ -66,13 +72,13 @@ class StackProtocol(Protocol):
         self.lower_protocols = []
 
     @abstractmethod
-    def push(self, **kwargs):
+    def push(self, *args, **kwargs):
         """Method to receive information from protocols higher on stack (abstract)."""
 
         pass
 
     @abstractmethod
-    def pop(self, **kwargs):
+    def pop(self, *args, **kwargs):
         """Method to receive information from protocols lower on stack (abstract)."""
 
         pass

@@ -4,7 +4,7 @@ This module defines code to support the BBPSSW protocol for entanglement purific
 Success results are pre-determined based on network parameters.
 Also defined is the message type used by the BBPSSW code.
 """
-
+from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -15,10 +15,10 @@ if TYPE_CHECKING:
     from ...topology.node import Node
 
 from ...utils import log
-from ...constants import KET_STATE_FORMALISM, DENSITY_MATRIX_FORMALISM
+from ...constants import KET_VECTOR_FORMALISM, DENSITY_MATRIX_FORMALISM
 from .bbpssw_protocol import BBPSSWProtocol, BBPSSWMessage, BBPSSWMsgType
 
-@BBPSSWProtocol.register(KET_STATE_FORMALISM)
+@BBPSSWProtocol.register(KET_VECTOR_FORMALISM)
 @BBPSSWProtocol.register(DENSITY_MATRIX_FORMALISM)
 class BBPSSWCircuit(BBPSSWProtocol):
     """Purification protocol instance.
@@ -44,7 +44,7 @@ class BBPSSWCircuit(BBPSSWProtocol):
     circuit.cx(0, 1)
     circuit.measure(1)
 
-    def __init__(self, owner: "Node", name: str, kept_memo: "Memory", meas_memo: "Memory"):
+    def __init__(self, owner: Node, name: str, kept_memo: Memory, meas_memo: Memory):
         """Constructor for purification protocol.
 
         args:
@@ -117,7 +117,7 @@ class BBPSSWCircuit(BBPSSWProtocol):
         self.update_resource_manager(self.meas_memo, "RAW")
         if self.meas_res == msg.meas_res:
             self.kept_memo.fidelity = self.improved_fidelity(self.kept_memo.fidelity)
-            self.update_resource_manager(self.kept_memo, state="ENTANGLED")
+            self.update_resource_manager(self.kept_memo, state="PURIFIED")
         else:
             self.update_resource_manager(self.kept_memo, state="RAW")
 

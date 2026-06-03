@@ -21,7 +21,7 @@ from .photon import Photon
 from ..kernel.entity import Entity
 from ..kernel.event import Event
 from ..kernel.process import Process
-from ..constants import KET_STATE_FORMALISM, DENSITY_MATRIX_FORMALISM
+from ..constants import KET_VECTOR_FORMALISM, DENSITY_MATRIX_FORMALISM
 from ..utils.encoding import *
 from ..utils import log
 
@@ -54,7 +54,7 @@ def _set_state_with_fidelity(keys: list[int], desired_state: list[complex], fide
                        BSM._psi_plus, BSM._psi_minus]
     assert desired_state in possible_states
 
-    if qm.get_active_formalism() == KET_STATE_FORMALISM:
+    if qm.get_active_formalism() == KET_VECTOR_FORMALISM:
         probabilities = [(1 - fidelity) / 3] * 4
         probabilities[possible_states.index(desired_state)] = fidelity
         state_ind = rng.choice(4, p=probabilities)
@@ -73,26 +73,24 @@ def _set_state_with_fidelity(keys: list[int], desired_state: list[complex], fide
 
 
 def _set_pure_state(keys: list[int], ket_state: list[complex], qm: "QuantumManager"):
-    if qm.get_active_formalism() == KET_STATE_FORMALISM:
+    if qm.get_active_formalism() == KET_VECTOR_FORMALISM:
         qm.set(keys, ket_state)
     elif qm.get_active_formalism() == DENSITY_MATRIX_FORMALISM:
         state = outer(ket_state, ket_state)
         qm.set(keys, state)
     else:
-        raise NotImplementedError("formalism of quantum state {} is not "
-                                  "implemented in the set_pure_quantum_state "
+        raise NotImplementedError("formalism of quantum state {} is not implemented in the set_pure_quantum_state "
                                   "function of bsm.py".format(qm.get_active_formalism()))
 
 
 def _eq_psi_plus(state: "State", formalism: str):
-    if formalism == KET_STATE_FORMALISM:
+    if formalism == KET_VECTOR_FORMALISM:
         return array_equal(state.state, BSM._psi_plus)
     elif formalism == DENSITY_MATRIX_FORMALISM:
-        d_state = outer(BSM._phi_plus, BSM._psi_plus)
+        d_state = outer(BSM._psi_plus, BSM._psi_plus)
         return array_equal(state.state, d_state)
     else:
-        raise NotImplementedError("formalism of quantum state {} is not "
-                                  "implemented in the eq_phi_plus "
+        raise NotImplementedError("formalism of quantum state {} is not implemented in the eq_phi_plus "
                                   "function of bsm.py".format(formalism))
 
 
@@ -166,9 +164,9 @@ class BSM(Entity):
             photon (Photon): photon to measure.
         """
 
-        assert photon.encoding_type["name"] == self.encoding, \
-            "BSM expecting photon with encoding '{}' received photon with encoding '{}'".format(
-                self.encoding, photon.encoding_type["name"])
+        assert photon.encoding_type["name"] == self.encoding, (
+            f"BSM expecting photon with encoding '{self.encoding}' "
+            f"received photon with encoding '{photon.encoding_type['name']}'")
 
         # check if photon arrived later than current photon
         if self.photon_arrival_time < self.timeline.now():
@@ -678,8 +676,8 @@ class SingleHeraldedBSM(BSM):
                 log.logger.debug(f'{self.name}: photonic BSM failed')
             else:
                 p0, p1 = self.photons
-                # if both memory successfully emit the photon in this round (consider memory emission inefficiency)
                 if self.get_generator().random() > p0.loss and self.get_generator().random() > p1.loss:
+                    # if both photons successfully arrive (not lost in memory or optical fiber) and the BSM is successful
                     for idx, photon in enumerate(self.photons):
                         detector = self.detectors[idx]
                         detector.get(photon)

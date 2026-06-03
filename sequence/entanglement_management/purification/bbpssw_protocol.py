@@ -1,11 +1,14 @@
+"""Base class for BBPSSW entanglement purification protocol.
+"""
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import TYPE_CHECKING, List, Dict, Type, Optional
+from typing import TYPE_CHECKING
 from collections.abc import Callable
 
 from sequence.entanglement_management.entanglement_protocol import EntanglementProtocol
 from sequence.utils.log import logger
-from ...constants import KET_STATE_FORMALISM
+from ...constants import KET_VECTOR_FORMALISM
 from ...message import Message
 
 if TYPE_CHECKING:
@@ -29,9 +32,10 @@ class BBPSSWMessage(Message):
         receiver (str): name of destination protocol instance.
     """
 
-    def __init__(self, msg_type: BBPSSWMsgType, receiver: str, meas_res: int, **kwargs):
+    def __init__(self, msg_type: BBPSSWMsgType, receiver: str, meas_res: int, protocol_type: str='bbpssw'):
         super().__init__(msg_type, receiver)
         self.meas_res = meas_res
+        self.protocol_type = protocol_type
 
     def __str__(self):
         return f"\"BBPSSW: type={self.msg_type}, meas_res={self.meas_res}\""
@@ -39,9 +43,9 @@ class BBPSSWMessage(Message):
 
 class BBPSSWProtocol(EntanglementProtocol, ABC):
     _registry: dict[str, type['BBPSSWProtocol']] = {}
-    _global_formalism: str = KET_STATE_FORMALISM
+    _global_formalism: str = KET_VECTOR_FORMALISM
 
-    def __init__(self, owner: "Node", name: str, kept_memo: "Memory", meas_memo: "Memory", **kwargs):
+    def __init__(self, owner: Node, name: str, kept_memo: Memory, meas_memo: Memory, **kwargs):
         """Constructor for purification protocol.
 
         args:
@@ -51,7 +55,7 @@ class BBPSSWProtocol(EntanglementProtocol, ABC):
             meas_memo (Memory): Memory to measure and discard.
         """
         assert kept_memo != meas_memo
-        super().__init__(owner, name)
+        super().__init__(owner, name, 'bbpssw')
         self.memories: list[Memory] = [kept_memo, meas_memo]
         self.kept_memo: Memory = kept_memo
         self.meas_memo: Memory = meas_memo
@@ -92,7 +96,7 @@ class BBPSSWProtocol(EntanglementProtocol, ABC):
 
         Args:
             name (str): Name of the protocol to register.
-            protocol_class (Type[BBPSSWProtocol], optional): The protocol class to register
+            protocol_class (type[BBPSSWProtocol], optional): The protocol class to register
 
         Returns:
             If used as a decorator, returns the decorator function.
@@ -155,7 +159,7 @@ class BBPSSWProtocol(EntanglementProtocol, ABC):
     @classmethod
     def clear_global_formalism(cls) -> None:
         """Resets the global formalism to default"""
-        cls._global_formalism = KET_STATE_FORMALISM
+        cls._global_formalism = KET_VECTOR_FORMALISM
 
     def is_ready(self) -> bool:
         """Check if the protocol is ready to start."""
@@ -167,7 +171,7 @@ class BBPSSWProtocol(EntanglementProtocol, ABC):
         args:
             protocol (str): Other protocol name.
             node (str): Other node name.
-            memories (List[str]): The list of memory names used on other node.
+            memories (list[str]): The list of memory names used on other node.
         """
         self.remote_node_name = node
         self.remote_protocol_name = protocol
@@ -186,14 +190,12 @@ class BBPSSWProtocol(EntanglementProtocol, ABC):
         # Validation before starting the protocol
         kept_entangled_memo = self.kept_memo.entangled_memory['node_id']
         meas_entangled_memo = self.meas_memo.entangled_memory['node_id']
-        assert self.is_ready(), \
-            "Protocol is not ready to start. Remote node not set, please use set_others() function to set it."
-        assert kept_entangled_memo == meas_entangled_memo, \
-            f'Mismatch of entangled memories {kept_entangled_memo} and {meas_entangled_memo} on node {self.owner.name}.'
-        assert self.kept_memo.fidelity > 0.5, \
-            f'Fidelity of kept memory is too low: {self.kept_memo.fidelity}.'
-        assert self.meas_memo.fidelity > 0.5, \
-            f'Fidelity of measurement memory is too low: {self.meas_memo.fidelity}.'
+        assert self.is_ready(), (
+            "Protocol is not ready to start. Remote node not set, please use set_others() function to set it.")
+        assert kept_entangled_memo == meas_entangled_memo, (
+            f'Mismatch of entangled memories {kept_entangled_memo} and {meas_entangled_memo} on node {self.owner.name}.')
+        assert self.kept_memo.fidelity > 0.5, f'Fidelity of kept memory is too low: {self.kept_memo.fidelity}.'
+        assert self.meas_memo.fidelity > 0.5, f'Fidelity of measurement memory is too low: {self.meas_memo.fidelity}.'
 
     @abstractmethod
     def received_message(self, src: str, msg: BBPSSWMessage) -> None:
@@ -218,8 +220,7 @@ class BBPSSWProtocol(EntanglementProtocol, ABC):
         Side Effects:
             Will call `update_resource_manager` method.
         """
-        assert memory in self.memories, \
-            f'Memory {memory.name} is not part of this protocol instance.'
+        assert memory in self.memories, f'Memory {memory.name} is not part of this protocol instance.'
 
         if self.meas_memo is None:
             self.update_resource_manager(memory, 'RAW')

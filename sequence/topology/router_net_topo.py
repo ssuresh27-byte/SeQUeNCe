@@ -2,11 +2,12 @@ import json
 import numpy as np
 from networkx import Graph, dijkstra_path, exception
 
+from ..network_management.routing import DistributedRoutingProtocol, StaticRoutingProtocol
 from .topology import Topology as Topo
 from ..kernel.timeline import Timeline
-from ..kernel.quantum_manager import KET_STATE_FORMALISM, QuantumManager
+from ..constants import KET_VECTOR_FORMALISM, SPEED_OF_LIGHT
+from ..kernel.quantum_manager import QuantumManager
 from .node import BSMNode, QuantumRouter
-from ..constants import SPEED_OF_LIGHT
 
 
 class RouterNetTopo(Topo):
@@ -23,12 +24,7 @@ class RouterNetTopo(Topo):
         cchannels (list[ClassicalChannel]): list of classical channel objects in network.
         tl (Timeline): the timeline used for simulation
     """
-    ALL_GROUP = "groups"
-    ASYNC = "async"
     BSM_NODE = "BSMNode"
-    GROUP = "group"
-    IP = "ip"
-    LOOKAHEAD = "lookahead"
     MEET_IN_THE_MID = "meet_in_the_middle"
     MEMO_ARRAY_SIZE = "memo_size"     # NOTE meant for communication memories
     PORT = "port"
@@ -36,15 +32,25 @@ class RouterNetTopo(Topo):
     QUANTUM_ROUTER = "QuantumRouter"
     CONTROLLER = "Controller"
 
-    def __init__(self, conf_file_name: str):
+    def __init__(self, config_source: str | dict):
+        """
+        Constructor for RouterNetTopo class.
+
+        Args:
+            config_source (str | dict): the name of configuration file or the config dictionary
+        """
         self.bsm_to_router_map = {}
         self.encoding_type = None
-        super().__init__(conf_file_name)
+        super().__init__(config_source)
 
-    def _load(self, filename: str):
-        with open(filename) as fh:
-            config = json.load(fh)
+    def _load(self, config_source: str | dict):
+        """
+        Method for parsing configuration file and generate network
 
+        Args:
+            config_source (str | dict): the name of configuration file or the config dictionary
+        """
+        config = super()._load(config_source)
         self._get_templates(config)
         # quantum connections are only supported by sequential simulation so far
         self._add_qconnections(config)
@@ -59,12 +65,12 @@ class RouterNetTopo(Topo):
 
     def _add_timeline(self, config: dict):
         stop_time = config.get(Topo.STOP_TIME, 10 ** 23)
-        formalism = config.get(Topo.FORMALISM, KET_STATE_FORMALISM)
+        formalism = config.get(Topo.FORMALISM, KET_VECTOR_FORMALISM)
         truncation = config.get(Topo.TRUNC, 1)
         QuantumManager.set_global_manager_formalism(formalism)
         self.tl = Timeline(stop_time=stop_time, truncation=truncation)
 
-    def _map_bsm_routers(self, config):
+    def _map_bsm_routers(self, config: dict):
         for qc in config[Topo.ALL_Q_CHANNEL]:
             src, dst = qc[Topo.SRC], qc[Topo.DST]
             if dst in self.bsm_to_router_map:
@@ -126,10 +132,10 @@ class RouterNetTopo(Topo):
                     cc_delay.append(delay)
             if len(cc_delay) == 0:
                 assert 0, q_connect
-            cc_delay = np.mean(cc_delay) // 2
+            cc_delay = int(np.mean(cc_delay) // 2)
 
             if channel_type == self.MEET_IN_THE_MID:
-                bsm_name = f"BSM.{node1}.{node2}.auto"  # the intermediate BSM node
+                bsm_name = f"BSM.{node1}.{node2}"  # the intermediate BSM node
                 bsm_seed = q_connect.get(Topo.SEED, 0)
                 bsm_template_name = q_connect.get(Topo.TEMPLATE, None)
                 bsm_info = {self.NAME: bsm_name,
@@ -139,7 +145,7 @@ class RouterNetTopo(Topo):
                 config[self.ALL_NODE].append(bsm_info)
 
                 for src in [node1, node2]:
-                    qc_name = f"QC.{src}.{bsm_name}"  # the quantum channel
+                    qc_name = f"QC-{src}-{bsm_name}"  # the quantum channel
                     qc_info = {self.NAME: qc_name,
                                self.SRC: src,
                                self.DST: bsm_name,
@@ -149,7 +155,7 @@ class RouterNetTopo(Topo):
                         config[self.ALL_Q_CHANNEL] = []
                     config[self.ALL_Q_CHANNEL].append(qc_info)
 
-                    cc_name = f"CC.{src}.{bsm_name}"  # the classical channel
+                    cc_name = f"CC-{src}-{bsm_name}"  # the classical channel
                     cc_info = {self.NAME: cc_name,
                                self.SRC: src,
                                self.DST: bsm_name,
@@ -159,7 +165,7 @@ class RouterNetTopo(Topo):
                         config[self.ALL_C_CHANNEL] = []
                     config[self.ALL_C_CHANNEL].append(cc_info)
 
-                    cc_name = f"CC.{bsm_name}.{src}"
+                    cc_name = f"CC-{bsm_name}-{src}"
                     cc_info = {self.NAME: cc_name,
                                self.SRC: bsm_name,
                                self.DST: src,
@@ -170,7 +176,13 @@ class RouterNetTopo(Topo):
                 raise NotImplementedError("Unknown type of quantum connection")
 
     def _generate_forwarding_table(self, config: dict):
-        """For static routing."""
+        """If static routing is chosen, then generate forwarding table for each quantum router based on Dijkstra's algorithm.
+           If distributed routing is chosen, then initialize link cost for each quantum router and setup the FSM.
+
+        Args:
+            config (dict): the configuration dictionary used to generate the topology
+        """
+        # get the link cost
         graph = Graph()
         for node in config[Topo.ALL_NODE]:
             if node[Topo.TYPE] == self.QUANTUM_ROUTER:
@@ -185,19 +197,37 @@ class RouterNetTopo(Topo):
                 costs[bsm] = [router] + costs[bsm]
                 costs[bsm][-1] += qc.distance
 
-        graph.add_weighted_edges_from(costs.values())
-        for src in self.nodes[self.QUANTUM_ROUTER]:
-            for dst_name in graph.nodes:
-                if src.name == dst_name:
-                    continue
-                try:
-                    if dst_name > src.name:
-                        path = dijkstra_path(graph, src.name, dst_name)
-                    else:
-                        path = dijkstra_path(graph, dst_name, src.name)[::-1]
-                    next_hop = path[1]
-                    # routing protocol locates at the bottom of the stack
-                    routing_protocol = src.network_manager.protocol_stack[0]  # guarantee that [0] is the routing protocol?
-                    routing_protocol.add_forwarding_rule(dst_name, next_hop)
-                except exception.NetworkXNoPath:
-                    pass
+        # check if all routers use static routing, if not, initialize distributed routing protocol
+        routing_protocol = None
+        for q_router in self.nodes[self.QUANTUM_ROUTER]:
+            routing_protocol = q_router.network_manager.get_routing_protocol()
+            break
+
+        if isinstance(routing_protocol, StaticRoutingProtocol):
+            # static routing, directly configure the forwarding tables
+            graph.add_weighted_edges_from(costs.values())
+            for src in self.nodes[self.QUANTUM_ROUTER]:
+                for dst_name in graph.nodes:
+                    if src.name == dst_name:
+                        continue
+                    try:
+                        if dst_name > src.name:
+                            path = dijkstra_path(graph, src.name, dst_name)
+                        else:
+                            path = dijkstra_path(graph, dst_name, src.name)[::-1]
+                        next_hop = path[1]
+                        # routing protocol locates at the bottom of the stack
+                        routing_protocol = src.network_manager.get_routing_protocol()
+                        routing_protocol.update_forwarding_rule(dst_name, next_hop)
+                    except exception.NetworkXNoPath:
+                        pass
+    
+        elif isinstance(routing_protocol, DistributedRoutingProtocol):
+            # distributed routing, initialize the link cost and setup the FSM
+            for q_router in self.nodes[self.QUANTUM_ROUTER]:
+                routing_protocol: DistributedRoutingProtocol = q_router.network_manager.get_routing_protocol()
+                for bsm, cost_info in costs.items():
+                    if q_router.name in cost_info:
+                        neighbor = cost_info[0] if cost_info[0] != q_router.name else cost_info[1]
+                        cost = cost_info[2]
+                        routing_protocol.link_cost[neighbor] = cost

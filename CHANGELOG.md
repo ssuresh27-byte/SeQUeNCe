@@ -5,6 +5,123 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-3-02
+### Added
+- Add a module to convert an arbitrary graph object to sequence configurations for QuantumRouter with MIM BSM
+- Add FatTree topology and BCube topology 
+- Added the `routing` module: a new parent class `RoutingProtocol` for the subclasses `StaticRoutingProtocol` and `DistributedRoutingProtocol`. The register decorator is used to make it easy to plug in new routing protocols in the future.
+- Add empty init() to Protocol to satisfy class hierarchy.
+- Created project scripts for each config generator.
+- Added the `swapping` module that has the following classes. The subclasses use the registry decorator (factory pattern).
+    - Base class: `EntanglementSwappingA` & `EntanglementSwappingB`
+    - Subclass for ket vector and density matrix: `EntanglementSwappingA_Circuit` & `EntanglementSwappingB_Circuit`
+    - Subclass for Bell diagonal state: `EntanglementSwappingA_BDS` & `EntanglementSwappingB_BDS`
+- Update the tutorial to catch up on the recent updates. Add notes saying refer to chapter 6 Application module for standard usage
+- Introducing `EARLY_EXPIRE` message type. A request has a `start_time` and `end_time`. When a request is finished before the `end_time`, then the reservation (and the associated rules) should expire early. If not, the quantum network will keep generating entanglement pairs because the rules still exist.
+
+
+### Changed
+- Using typer for CLI, creates a unified interface for topology generation. Allow for custom graph objects in CLI.
+- Moved all old topologies to NetworkX graph objects
+- Docstring, comment, logging, and various cosmetic updates.
+- Moved routing_protocol init() to network manager.
+- Trigger empty inits for resource and network manager to enable future bootstrapping.
+- Migrated `utils/json_config_generators/` to `sequence/config_generators/`.
+- Add a `sender_delay` argument to the `Node.send_message()` to account for processing delay, queueing delay, transmission delay, etc.
+- Break down the `quantum_manager.py` into a module consisting of multiple files where each file has a quantum manager class
+- Break down the `quantum_state.py` into a module consisting of multiple files where each file has a quantum state class
+
+### Removed
+- Old configuration generators 
+- The old `swapping.py` is removed
+- The old `quantum_manager.py` is removed
+- The old `quantum_state.py` is removed
+- Removed support for Python 3.11
+- Removed `qlan` submodule
+
+### Bug fix
+- Some minor bugs in quantum states
+
+
+## [0.8.5] - 2026-2-27
+### Added
+- `NetworkManager` ABC with a factory pattern for selection and future implementation of new network managers.
+- File `action_condition_set.py` is added. This contains the action, condition, and request functions for entanglement generation, swapping, and purification.
+- Class `DistributedRoutingProtocol` is added, among many other supporting classes in `routing_distributed`. This module does distributed entanglement routing.
+- Class `NetworkManager` has two new attributes: `forwarding_table` and `routing_protocol`.
+- Add a cutoff flag to memory to allow disable the expiration of memories.
+- Add a template in config json for network manager to select routing protocols (distributed vs. static)
+- Add seven new unit tests to cover the newly added `routing_distributed` module
+- Added `generate_reference_rst.py` to generate the .rst files for the Read the Doc.
+
+### Changed
+- `RSVPProtocol` is now decoupled from the `DistributedNetworkManager`.
+- Moved `ResourceReservationProtocol` to `RSVPProtocol` in `rsvp.py`. 
+- Moved `MemoryTimecard` to `memory_timecard.py` and are instantiated by the `NetworkManager`
+  - `RSVPProtocol` does not instantiate `MemoryTimecard` anymore. The `timecards` attribute in `RSVPProtocol` becomes a reference to the `MemoryTimecard` in `NetworkManager`
+- NetworkManager is now `DistributedNetworkManager`
+- Extend and refactor the tests in `test_reservation.py`
+- Minor refactors pertaining to typing errors in `memory.py`, `resource_manager.py`, `rule_manager.py`, `network_manager.py` and `reservation.py`
+- The `create_rules()` and `load_rules()` functions of the `ResourceReservationProtocol` were consolidated and moved to the `ResourceManager` `generate_load_rules()`
+- The `purification_mode` class attribute is now part of a `Reservation`, and is contained within the message.
+- Fixing typing issues with `ResourceManagment`, `NetworkManager`, `ResourceReservationProtocol`, and related functions throughout the codebase.
+- Update the LICENSE.md copyright year
+- The previous `StaticRoutingProtocol` class is split into two classes: `StaticRoutingProtocol` and `ForwardingProtocol`. This can be viewed as the separation of control-plane and the data plane for the entanglement routing module. The control plane does the routing, the data plane does the forwarding. The Routing Protocols write to the `forwarding_table`, while the Forwarding Protocol reads from the `forwarding_table`.
+- Minor refactors in `router_net_topo.py` and `network_manager.py`.
+- Memory.cutoff_ratio is allowed to be greater than 1.
+- Suppress linear algebra-related warning (doing `sqrtm` on singular matrix)
+- Tutorial Chapter 5 on Network Manager. A new figure for network manager is introduced.
+- Read the Docs is updated. The remote Read the Docs can now pre-build the .rst files.
+- Attribute `protocol_type` is moved from class `EntanglementProtocol` to class `Protocol`.
+
+### Removed
+- Temporarily disabled setting the `es_succ_prob` and `es_deg_rate` from the RSVP protocol.
+- `routing.py` module is removed, replaced by `routing_distributed.py`, `routing_static.py`, and `forwarding.py`.
+
+
+## [0.8.4] - 2025-12-14
+### Fixed
+- A minor bug in tutorial `two_node_eg.ipynb`
+- A minor bug in `timeline.py`
+
+
+## [0.8.3] - 2025-12-11
+### Added
+- Add support for Python 3.14
+- A new function `read_version_from_pyproject()`. Don't need to update the version number 0.x.x at multiple locations anymore
+
+### Changed
+- Moves the build-backend from legacy python to uv. More speed, more verbose useful errors, no more specifying modules in pyproject, dependency locks
+
+### Fixed
+- A minor bug in `gui.py`
+
+
+## [0.8.2] - 2025-11-21
+### Added
+- A new state `PURIFIED` in `MemoryInfo` is introduced to enable the new purify strategy `once`, i.e. only purify one time. The previous existing stragety is renamed to `until_target`, i.e., keep purifing until reaching the target fidelity.
+- `QuantumManagerKet.get_ascending_keys()`: call `reorder_qubits_ascending_keys()` before getting the state
+- `QuantumManagerKet.reorder_qubits_ascending_keys()`: reorder the quantum state such that the corresponding keys are in ascending order.
+- `QuantumManagerDensity.get_ascending_keys()` and `QuantumManagerDensity.reorder_qubits_ascending_keys()`: same reording qubits for density matrix formalism.
+- `quantum_utils.pretty_ket()`: return a pretty-looking state vector string
+- `NetworkManager.get_reservation_protocol()`: Method to get the resource reservation protocol in the network manager's protocol stack.
+
+### Changed
+- Updated workflows `development.yml`, `publish.yml`, `validation.yml`. Only run on the main repository (sequence-toolbox/SeQUeNCe), preventing unintended builds and publishes from forks.
+- Standardized `gmpy2` context precision to 80 bits in timing-related modules (`detector.py`, `optical_channel.py`) for computation efficiency and sufficient accuracy.
+- `quantum_utils.measure_entangled_state_with_cache_ket()`: make code more mathematically sound.
+- A lot of minor refactoring (spacing, indentation, f-string, comments, docstring, etc.)
+- Updated related `pytest`
+
+### Fixed
+- Improved time calculations in `Detector.record_detection` to use high-precision `gmpy2`
+
+### Removed
+- Remove all parallel module related stuff under `utils/json_config_gnerators/*`, `config_generator.py` and `router_net_topo.py`.
+- Removing and reorganizing examples in the `example` folder.
+
+
+
 ## [0.8.1] - 2025-09-17
 ### Changed
 - Migrate code to fit PEP requirements for py3.11

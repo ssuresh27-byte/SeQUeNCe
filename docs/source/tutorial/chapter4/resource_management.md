@@ -1,5 +1,11 @@
 # Chapter 4: Resource Management
 
+**NOTE**: The standard way to generate entanglement is to use the `app` module, which is discussed in chapter 6. The purpose of this chapter is to explain what is happening under the hood in the resource management module. 
+
+See `sequence.resource_management.action_condition_set` for detailed docstrings.
+
+---
+
 In this tutorial, we will show the usual operation of the Resource Management module included in SeQUeNCe. We’re going to build a linear, three-node network and create two entanglement flows. The network, including flows, is shown below:
 
 ![topo](figures/two_flow_linear_topo.png)
@@ -12,11 +18,15 @@ We will also be creating a custom node class to meet the requirements of this ex
 
 ### Background
 
-The Resource Management module in SeQUeNCe is responsible for managing the usage of quantum memory and flow of information from hardware elements on a node. This is achieved with an internal **memory manager** and **rule manager**, as shown below:
+The Resource Management module in SeQUeNCe is responsible for managing the usage of quantum memory and flow of information from hardware elements on a node. This is achieved with an internal **Memory Manager**, **Rule Manager**, and an **Action & Condition Set** as shown below:
 
 ![rm](figures/resource_management.png)
 
-The memory manager is used to track the current state of all quantum memories (including entanglement, fidelity, etc.) while the rule manager uses a set of “rules” (containing a priority, condition to be met, and action to take) to direct local protocols.
+The Memory Manager is used to track the current state of all quantum memories (including entanglement, fidelity, etc.) while the Rule Manager manages a set of “rules” (containing a priority, condition to be met, and action to take) to direct local protocols.
+
+The Rule Manager needs the following to generates the rules:
+1. Timecard and Reservation from the Network Manager
+2. Action set and Condition Set stored inside the Resource Management module.
 
 ### Step 1: Create custom node type
 
@@ -87,8 +97,8 @@ def eg_rule_condition(memory_info: "MemoryInfo", manager: "MemoryManager", args)
 
 Rule conditions take 3 arguments:
 
-- `memory_info`, containing the information stored in the memory manager,
-- `manager`, which is a reference to the memory manager, and
+- `memory_info`, containing the information stored in the Memory Manager,
+- `manager`, which is a reference to the Memory Manager, and
 - `args`, which is a dictionary to store values of other arguments, like `index_upper` and `index_lower`
 
 In our case, we will use any memories in the `RAW` (unentangled) state. Other possible memory states are `OCCUPIED` (for
@@ -97,7 +107,7 @@ memory). If our desired condition is met, we will return the `memory_info` as a 
 nothing.
 
 The arguments for `args` for flow 1 are shown in the bottom comment.
-We will create a variable to store these when we load the rule into the rule manager.
+We will create a variable to store these when we load the rule into the Rule Manager.
 
 ### Step 3: Create Rule Actions for Flow 1
 
@@ -113,8 +123,8 @@ condition of the rule. They should return four objects:
 4. Arguments for the requirements function.
 
 In our case, we will create an entanglement generation protocol on both nodes and have router 1 confirm that router 2  has created a protocol.
-`eg_rule_action1` will give the action for router 1 (including sending a requirement to router  2), and `eg_rule_action2` will give the action for router 2.
-The action on router 1 will create the `EntanglementGenerationA` protocol and request the corresponding protocol from router 2 by sending the function `eg_req_func` and its arguments `req_args`.
+`eg_rule_action_await` will give the action for router 1 (including sending a requirement to router  2), and `eg_rule_action_request` will give the action for router 2.
+The action on router 1 will create the `EntanglementGenerationA` protocol and request the corresponding protocol from router 2 by sending the function `eg_match_func` and its arguments `req_args`.
 The `req_args` contain constraints about the target protocol.
 In this example, we use the type of protocol and memory index to filter the proper protocol.
 The action on router 2 will create an `EntanglementGenerationA` protocol and wait for a request from router 1.
@@ -124,7 +134,7 @@ Note that the name of router 1 will be `“r1”`, the name of router 2 will be 
 ```python
 from sequence.entanglement_management.generation import EntanglementGenerationA
 
-def eg_req_func(protocols, args):
+def eg_match_func(protocols, args):
     remote_node = args["remote_node"]
     index_upper = args["index_upper"]
     index_lower = args["index_lower"]
@@ -138,29 +148,28 @@ def eg_req_func(protocols, args):
             return protocol
 
 
-def eg_rule_action1(memories_info: List["MemoryInfo"], args):
+def eg_rule_action_await(memories_info: List["MemoryInfo"], args):
+    mid_name = args["mid_name"]
+    other_name = args["other_name"]
+    memories = [info.memory for info in memories_info]
+    memory = memories[0]
+    protocol = EntanglementGenerationA.create(None, "EGA." + memory.name,
+                                              mid_name, other_name, memory)
+    return [protocol, [None], [None], [None]]
+
+
+def eg_rule_action_request(memories_info: List["MemoryInfo"], args):
     mid_name = args["mid_name"]
     other_name = args["other_name"]
 
     memories = [info.memory for info in memories_info]
     memory = memories[0]
-    protocol = EntanglementGenerationA(None, "EGA." + memory.name, mid_name,
-                                       other_name,
-                                       memory)
+    protocol = EntanglementGenerationA.create(None, "EGA." + memory.name, 
+                                              mid_name, other_name, memory)
     req_args = {"remote_node": args["node_name"],
                 "index_upper": args["index_upper"],
                 "index_lower": args["index_lower"]}
-    return [protocol, [other_name], [eg_req_func], [req_args]]
-
-
-def eg_rule_action2(memories_info: List["MemoryInfo"], args):
-    mid_name = args["mid_name"]
-    other_name = args["other_name"]
-    memories = [info.memory for info in memories_info]
-    memory = memories[0]
-    protocol = EntanglementGenerationA(None, "EGA." + memory.name,
-                                       mid_name, other_name, memory)
-    return [protocol, [None], [None], [None]]
+    return [protocol, [other_name], [eg_match_func], [req_args]]
 ```
 
 ### Step 4: Build the Network
@@ -226,10 +235,10 @@ tl.init()
 action_args = {"mid_name": "m12", "other_name": "r2", "node_name": "r1",
                "index_upper": 9, "index_lower": 0}
 condition_args = {"index_lower": 0, "index_upper": 9}
-rule1 = Rule(10, eg_rule_action1, eg_rule_condition, action_args, condition_args)
+rule1 = Rule(10, eg_rule_action_request, eg_rule_condition, action_args, condition_args)
 r1.resource_manager.load(rule1)
 action_args2 = {"mid_name": "m12", "other_name": "r1"}
-rule2 = Rule(10, eg_rule_action2, eg_rule_condition, action_args2, condition_args)
+rule2 = Rule(10, eg_rule_action_await, eg_rule_condition, action_args2, condition_args)
 r2.resource_manager.load(rule2)
 
 tl.run()
@@ -258,8 +267,7 @@ To do this, we'll create a function `add_eg_rules` that takes as arguments
 - `path`, a list of router nodes that make up the path of the entanglement flow, and
 - `middles`, a list of bsm nodes along the path.
 
-The conditions and actions of the rule will be very similar to before, but with variable memory indices, nodes, and
-arguments.
+The conditions and actions of the rule will be very similar to before, but with variable memory indices, nodes, and arguments.
 
 ```python
 def add_eg_rules(index: int, path: List[RouterNode], middles: List[BSMNode]):
@@ -277,8 +285,7 @@ def add_eg_rules(index: int, path: List[RouterNode], middles: List[BSMNode]):
         condition_args = {"index_lower": mem_range[0],
                           "index_upper": mem_range[0] + 9}
 
-        rule = Rule(10, eg_rule_action2, eg_rule_condition, action_args,
-                    condition_args)
+        rule = Rule(10, eg_rule_action_await, eg_rule_condition, action_args, condition_args)
         node.resource_manager.load(rule)
 
     if index < (len(path) - 1):
@@ -295,14 +302,8 @@ def add_eg_rules(index: int, path: List[RouterNode], middles: List[BSMNode]):
                        "index_upper": node_mems[index + 1][1] - 1,
                        "index_lower": node_mems[index + 1][0]}
 
-        memories = [info.memory for info in memories_info]
-        memory = memories[0]
-        protocol = EntanglementGenerationA(None, "EGA." + memory.name, middle_names[index], node_names[index + 1],
-                                           memory)
-        return [protocol, [node_names[index + 1]], [req_func]]
-
-    rule = Rule(10, eg_rule_action, eg_rule_condition)
-    node.resource_manager.load(rule)
+        rule = Rule(10, eg_rule_action_request, eg_rule_condition, action_args, condition_args)
+        node.resource_manager.load(rule)
 ```
 
 ### Step 7: Flow 2 Entanglement Purification
@@ -316,10 +317,9 @@ The arguments for our `add_ep_rules` function will be similar to our previous fu
 - `target_fidelity`, the fidelity of entanglement we wish to achieve.
 
 ```python
-from sequence.entanglement_management.purification import BBPSSW
+from sequence.entanglement_management.purification import BBPSSWProtocol
 
-def ep_rule_condition1(memory_info: "MemoryInfo", manager: "MemoryManager",
-                       args):
+def ep_rule_condition_request(memory_info: "MemoryInfo", manager: "MemoryManager", args):
     index_upper = args["index_upper"]
     index_lower = args["index_lower"]
     target_fidelity = args["target_fidelity"]
@@ -336,13 +336,13 @@ def ep_rule_condition1(memory_info: "MemoryInfo", manager: "MemoryManager",
                 return [memory_info, info]
     return []
 
-def ep_req_func(protocols, args):
+def ep_match_func(protocols, args):
     remote1 = args["remote1"]
     remote2 = args["remote2"]
 
     _protocols = []
     for protocol in protocols:
-        if not isinstance(protocol, BBPSSW):
+        if not isinstance(protocol, BBPSSWProtocol):
             continue
 
         if protocol.kept_memo.name == remote1:
@@ -357,28 +357,25 @@ def ep_req_func(protocols, args):
     _protocols[1].rule.protocols.remove(_protocols[1])
     _protocols[1].kept_memo.detach(_protocols[1])
     _protocols[0].meas_memo = _protocols[1].kept_memo
-    _protocols[0].memories = [_protocols[0].kept_memo,
-                              _protocols[0].meas_memo]
-    _protocols[0].name = _protocols[0].name + "." + _protocols[
-        0].meas_memo.name
+    _protocols[0].memories = [_protocols[0].kept_memo, _protocols[0].meas_memo]
+    _protocols[0].name = _protocols[0].name + "." + _protocols[0].meas_memo.name
     _protocols[0].meas_memo.attach(_protocols[0])
 
     return _protocols[0]
 
 
-def ep_rule_action1(memories_info: List["MemoryInfo"], args):
+def ep_rule_action_request(memories_info: List["MemoryInfo"], args):
     memories = [info.memory for info in memories_info]
     name = "EP.%s.%s" % (memories[0].name, memories[1].name)
-    protocol = BBPSSW(None, name, memories[0], memories[1])
+    protocol = BBPSSWProtocol.create(None, name, memories[0], memories[1])
     dsts = [memories_info[0].remote_node]
-    req_funcs = [ep_req_func]
+    req_funcs = [ep_match_func]
     req_args = {"remote1": memories_info[0].remote_memo,
                 "remote2": memories_info[1].remote_memo}
     return [protocol, dsts, req_funcs, [req_args]]
 
 
-def ep_rule_condition2(memory_info: "MemoryInfo", manager: "MemoryManager",
-                       args):
+def ep_rule_condition_await(memory_info: "MemoryInfo", manager: "MemoryManager", args):
     index_upper = args["index_upper"]
     index_lower = args["index_lower"]
     target_fidelity = args["target_fidelity"]
@@ -388,10 +385,10 @@ def ep_rule_condition2(memory_info: "MemoryInfo", manager: "MemoryManager",
         return [memory_info]
     return []
 
-def ep_rule_action2(memories_info: List["MemoryInfo"], args):
+def ep_rule_action_await(memories_info: List["MemoryInfo"], args):
     memories = [info.memory for info in memories_info]
     name = "EP.%s" % (memories[0].name)
-    protocol = BBPSSW(None, name, memories[0], None)
+    protocol = BBPSSWProtocol.create(None, name, memories[0], None)
     return [protocol, [None], [None], [None]]
 
 
@@ -406,7 +403,7 @@ def add_ep_rules(index: int, path: List[RouterNode], target_fidelity: float):
                           "index_upper": mem_range[1] - 1,
                           "target_fidelity": target_fidelity}
 
-        rule = Rule(10, ep_rule_action1, ep_rule_condition1, {}, condition_args)
+        rule = Rule(10, ep_rule_action_request, ep_rule_condition_request, {}, condition_args)
         node.resource_manager.load(rule)
 
     if index < len(path) - 1:
@@ -419,7 +416,7 @@ def add_ep_rules(index: int, path: List[RouterNode], target_fidelity: float):
                               "index_upper": mem_range[1] - 1,
                               "target_fidelity": target_fidelity}
 
-        rule = Rule(10, ep_rule_action2, ep_rule_condition2, {}, condition_args)
+        rule = Rule(10, ep_rule_action_await, ep_rule_condition_await, {}, condition_args)
         node.resource_manager.load(rule)
 ```
 
@@ -433,8 +430,7 @@ For now, we will only define the actions and conditions and leave the rule creat
 ```python
 from sequence.entanglement_management.swapping import EntanglementSwappingA, EntanglementSwappingB
 
-def es_rule_conditionA(memory_info: "MemoryInfo", manager: "MemoryManager",
-                       args):
+def es_rule_condition_A(memory_info: "MemoryInfo", manager: "MemoryManager", args):
     index_lower = args["index_lower"]
     index_upper = args["index_upper"]
     target_fidelity = args["target_fidelity"]
@@ -463,7 +459,7 @@ def es_rule_conditionA(memory_info: "MemoryInfo", manager: "MemoryManager",
     return []
 
 
-def es_req_func(protocols, args):
+def es_match_func(protocols, args):
     target_memo = args["target_memo"]
     for protocol in protocols:
         if (isinstance(protocol, EntanglementSwappingB)
@@ -471,26 +467,23 @@ def es_req_func(protocols, args):
             return protocol
 
 
-def es_rule_actionA(memories_info: List["MemoryInfo"], args):
+def es_rule_action_A(memories_info: List["MemoryInfo"], args):
     succ_prob = args["succ_prob"]
     degradation = args["degradation"]
 
     memories = [info.memory for info in memories_info]
 
-    protocol = EntanglementSwappingA(None, "ESA.%s.%s" % (
-        memories[0].name, memories[1].name),
-                                     memories[0], memories[1],
-                                     success_prob=succ_prob,
-                                     degradation=degradation)
+    protocol_name = "ESA.%s.%s" % (memories[0].name, memories[1].name)
+    protocol = EntanglementSwappingA.create(None, protocol_name, memories[0], memories[1], 
+                                            success_prob=succ_prob, degradation=degradation)
     dsts = [info.remote_node for info in memories_info]
-    req_funcs = [es_req_func, es_req_func]
+    req_funcs = [es_match_func, es_match_func]
     req_args = [{"target_memo": memories_info[0].remote_memo},
                 {"target_memo": memories_info[1].remote_memo}]
     return [protocol, dsts, req_funcs, req_args]
 
 
-def es_rule_conditionB(memory_info: "MemoryInfo", manager: "MemoryManager",
-                       args):
+def es_rule_condition_B(memory_info: "MemoryInfo", manager: "MemoryManager", args):
     index_lower = args["index_lower"]
     index_upper = args["index_upper"]
     target_node = args["target_node"]
@@ -505,10 +498,10 @@ def es_rule_conditionB(memory_info: "MemoryInfo", manager: "MemoryManager",
         return []
 
 
-def es_rule_actionB(memories_info: List["MemoryInfo"], args):
+def es_rule_action_B(memories_info: List["MemoryInfo"], args):
     memories = [info.memory for info in memories_info]
     memory = memories[0]
-    protocol = EntanglementSwappingB(None, "ESB." + memory.name, memory)
+    protocol = EntanglementSwappingB.create(None, "ESB." + memory.name, memory)
     return [protocol, [None], [None], [None]]
 ```
 
@@ -523,10 +516,10 @@ tl.init()
 action_args = {"mid_name": "m12", "other_name": "r2", "node_name": "r1",
                "index_upper": 9, "index_lower": 0}
 condition_args = {"index_lower": 0, "index_upper": 9}
-rule1 = Rule(10, eg_rule_action1, eg_rule_condition, action_args, condition_args)
+rule1 = Rule(10, eg_rule_action_await, eg_rule_condition, action_args, condition_args)
 r1.resource_manager.load(rule1)
 action_args2 = {"mid_name": "m12", "other_name": "r1"}
-rule2 = Rule(10, eg_rule_action2, eg_rule_condition, action_args2, condition_args)
+rule2 = Rule(10, eg_rule_action_request, eg_rule_condition, action_args2, condition_args)
 r2.resource_manager.load(rule2)
 
 # load rules for flow 2
@@ -538,14 +531,14 @@ condition_args = {"index_lower": 10,
                   "index_upper": 20,
                   "target_node": r3.name,
                   "target_fidelity": 0.9}
-rule = Rule(10, es_rule_actionB, es_rule_conditionB, {}, condition_args)
+rule = Rule(10, es_rule_action_B, es_rule_conditionB, {}, condition_args)
 r1.resource_manager.load(rule)
 
 condition_args = {"index_lower": 0,
                   "index_upper": 10,
                   "target_node": r1.name,
                   "target_fidelity": 0.9}
-rule = Rule(10, es_rule_actionB, es_rule_conditionB, {}, condition_args)
+rule = Rule(10, es_rule_action_B, es_rule_conditionB, {}, condition_args)
 r3.resource_manager.load(rule)
 
 action_args = {"succ_prob": 1, "degradation": 1}
@@ -553,7 +546,7 @@ condition_args = {"index_lower": 10,
                   "index_upper": 30,
                   "target_fidelity": 0.9,
                   "left": r1.name, "right": r3.name}
-rule = Rule(10, es_rule_actionA, es_rule_conditionA, action_args, condition_args)
+rule = Rule(10, es_rule_action_A, es_rule_condition_A, action_args, condition_args)
 r2.resource_manager.load(rule)
 
 tl.run()

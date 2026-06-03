@@ -1,35 +1,73 @@
 [project]
 name = "sequence"
-version = "0.8.1"
+version = "1.0.0"
 authors = [
     { name = "Xiaoliang Wu, Joaquin Chung, Alexander Kolar, Alexander Kiefer, Eugene Wang, Tian Zhong, Rajkumar Kettimuthu, Martin Suchara, Robert Hayek, Ansh Singal, Caitao Zhan", email = "czhan@anl.gov" }
 ]
 maintainers = [
-    { name = "Caitao Zhan", email = "czhan@anl.gov" }
+    { name = "Caitao Zhan", email = "czhan@anl.gov" },
+    { name = "Robert Hayek", email = "rhayek@anl.gov" }
 ]
+license-files = ["LICENSE"]
 description = "Simulator of QUantum Network Communication (SeQUeNCe) is an open-source tool that allows modeling of quantum networks including photonic network components, control protocols, and applications."
 readme = "README.md"
-requires-python = ">=3.11, <3.14"
+requires-python = ">=3.12, <3.15"
 classifiers = [
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14"
 ]
-dynamic = ["dependencies"]
 keywords = ["quantum", "network", "discrete", "event", "simulator"]
+dependencies = [
+    "dash>=3.3.0",
+    "dash-bootstrap-components>=2.0.4",
+    "dash-core-components>=2.0.0",
+    "dash-cytoscape>=1.0.2",
+    "dash-html-components>=2.0.0",
+    "dash-table>=5.0.0",
+    "gmpy2>=2.2.2",
+    "graphviz>=0.21",
+    "ipywidgets>=8.1.8",
+    "jupyterlab>=4.5.0",
+    "matplotlib>=3.10.7",
+    "networkx>=3.6.1",
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "plotly>=6.5.0",
+    "pytest>=9.0.2",
+    "pyyaml>=6.0.3",
+    "qutip>=5.2.2",
+    "qutip-qip>=0.4.1",
+    "scipy>=1.16.3",
+    "seaborn>=0.13.2",
+    "tqdm>=4.67.1",
+    "typer>=0.24.1",
+]
 
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+[project.scripts]
+generate-topology = "sequence.utils.config_generator_cli:app"
 
-[tool.setuptools]
-packages = ['sequence', 'sequence.app', 'sequence.kernel', 'sequence.components', 'sequence.network_management',
-            'sequence.entanglement_management', 'sequence.qkd', 'sequence.resource_management', 'sequence.topology',
-            'sequence.utils', 'sequence.gui', 'sequence.qlan', 'sequence.topology.qlan',
-            'sequence.entanglement_management.generation', 'sequence.entanglement_management.purification',
-            'sequence.entanglement_management.teleportation']
+[build-system]
+requires = ["uv_build>=0.11.11,<0.12"]
+build-backend = "uv_build"
 
-[tool.setuptools.package-data]
-sequence = ["gui/user_templates.json", "gui/default_params.json", "gui/starlight.json"]
+[tool.uv.build-backend]
+module-root = ""
+module-name = "sequence"
+
+[tool.pytest.ini_options]
+markers = [
+    "unit: Marks tests as unit tests",
+]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.13.4",
+    "ruff>=0.15.1",
+    "ty>=0.0.16",
+    "pandas-stubs~=2.3.3",
+    "scipy-stubs~=1.16.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/sequence-toolbox/SeQUeNCe"

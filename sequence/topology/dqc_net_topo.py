@@ -6,7 +6,6 @@ from .topology import Topology as Topo
 from ..kernel.timeline import Timeline
 from .node import BSMNode
 from ..constants import SPEED_OF_LIGHT
-from typing import Dict, List, Type
 from .node import Node, DQCNode
 
 
@@ -31,15 +30,13 @@ class DQCNetTopo(Topo):
     DQC_NODE = "DQCNode"
     DATA_MEMO_ARRAY_SIZE = "data_memo_size"   # data memories
 
-    def __init__(self, conf_file_name: str):
+    def __init__(self, config_source: str | dict):
         self.bsm_to_router_map = {}
         self.encoding_type = None
-        super().__init__(conf_file_name)
+        super().__init__(config_source)
 
-    def _load(self, filename: str):
-        with open(filename) as fh:
-            config = json.load(fh)
-
+    def _load(self, config_source: str | dict):
+        config = super()._load(config_source)
         self._get_templates(config)
         # quantum connections are only supported by sequential simulation so far
         self._add_qconnections(config)
@@ -190,8 +187,8 @@ class DQCNetTopo(Topo):
                         path = dijkstra_path(graph, dst_name, src.name)[::-1]
                     next_hop = path[1]
                     # routing protocol locates at the bottom of the stack
-                    routing_protocol = src.network_manager.protocol_stack[0]  # guarantee that [0] is the routing protocol?
-                    routing_protocol.add_forwarding_rule(dst_name, next_hop)
+                    routing_protocol = src.network_manager.get_routing_protocol()
+                    routing_protocol.update_forwarding_rule(dst_name, next_hop)
                 except exception.NetworkXNoPath:
                     pass
 
@@ -201,7 +198,7 @@ class DQCNetTopo(Topo):
         
         Args:
             total_wires (int): The total number of wires (qubits) in the system.
-        Return:
+        Returns:
             dict[int, str]: A mapping from wire indices to node names.
         """
         mapping: dict[int, str] = {}
