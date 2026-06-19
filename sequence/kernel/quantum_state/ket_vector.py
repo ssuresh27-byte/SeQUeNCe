@@ -35,9 +35,18 @@ class KetState(State):
         if amplitudes.ndim != 1:
             raise ValueError("Ket state must be a 1D state vector.")
 
-        # check formatting
-        assert all([abs(a) <= 1 + EPSILON for a in amplitudes]), "Illegal value with abs > 1 in ket vector"
-        assert math.isclose(sum([abs(a) ** 2 for a in amplitudes]), 1), "Squared amplitudes do not sum to 1"
+        # check formatting (vectorized: the pure-Python `all([abs(a)...])` /
+        # `sum([abs(a)**2 ...])` comprehensions ran a Python-level loop over every
+        # amplitude on every KetState construction -- O(2^n) per state and the
+        # single largest cost in large distributed runs. numpy gives identical
+        # checks for a fraction of the time.)
+        #
+        # Old pure-Python version (kept for reference):
+        # assert all([abs(a) <= 1 + EPSILON for a in amplitudes]), "Illegal value with abs > 1 in ket vector"
+        # assert math.isclose(sum([abs(a) ** 2 for a in amplitudes]), 1), "Squared amplitudes do not sum to 1"
+        sq = (amplitudes.real ** 2 + amplitudes.imag ** 2)
+        assert np.all(sq <= (1 + EPSILON) ** 2), "Illegal value with abs > 1 in ket vector"
+        assert math.isclose(sq.sum(), 1), "Squared amplitudes do not sum to 1"
 
         num_subsystems = np.log(len(amplitudes)) / np.log(dim)
         assert dim ** int(round(num_subsystems)) == len(amplitudes),\
