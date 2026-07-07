@@ -58,3 +58,10 @@ STABILIZER_FORMALISM: Final = "stabilizer"
 BARRET_KOK: Final = 'barret_kok'
 #: Built-in single-heralded generation protocol identifier.
 SINGLE_HERALDED: Final = 'single_heralded'
+
+#: Built-in state-teleportation protocol identifier.
+TELEPORT: Final = 'teleport'
+#: Built-in teledata (teleport data qubit onto remote memory) protocol identifier.
+TELEDATA: Final = 'teledata'
+#: Built-in telegate (distributed/remote CNOT) protocol identifier.
+TELEGATE: Final = 'telegate'

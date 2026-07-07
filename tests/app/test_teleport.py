@@ -6,7 +6,7 @@ import itertools
 import numpy as np
 import pytest
 from sequence.topology.dqc_net_topo import DQCNetTopo
-from sequence.app.teleport_app import TeleportApp
+from sequence.app.teleportation.teleport_app import TeleportApp
 from sequence.constants import MILLISECOND
 from sequence.kernel.quantum_utils import verify_same_state_vector
 

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from ..components.memory import Memory
     from ..components.photon import Photon
     from ..app.request_app import RequestApp
-    from ..app.teleport_app import TeleportApp
+    from ..app.teleportation.teleport_app import TeleportApp
 
 from ..kernel.entity import Entity, ClassicalEntity
 from ..components.memory import MemoryArray
