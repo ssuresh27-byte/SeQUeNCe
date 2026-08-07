@@ -115,11 +115,24 @@ class QuantumManagerKet(QuantumManagerDenseQubit):
         return key
 
     def run_circuit(self, circuit, keys, meas_samp=None):
-        """Fast gate-contraction path. Apply `circuit` to the qubits named by
-        `keys`, returning {} or measurement results -- same contract as
-        old_run_circuit, but applying each gate by tensor contraction instead of
-        building the full matrix. Falls back to old_run_circuit for any
-        unsupported gate."""
+        """Apply a circuit to the qubits named by `keys` via the fast path.
+
+        Each gate is applied by tensor contraction instead of building the full
+        2^n operator -- same contract as old_run_circuit, but O(2^n) per gate
+        rather than O(4^n). Any gate without a fast matrix falls back to
+        old_run_circuit so no circuit is silently mishandled.
+
+        Args:
+            circuit (Circuit): quantum circuit to apply.
+            keys (list[int]): keys of the qubits to apply the circuit to, in
+                circuit-qubit order; may span several separate KetStates.
+            meas_samp (float): random sample in [0, 1) used for measurement;
+                required when the circuit measures any qubit.
+
+        Returns:
+            dict[int, int]: mapping of each measured key to its outcome, or an
+                empty dict when the circuit performs no measurement.
+        """
 
         # Fallback: if the circuit uses any gate we don't have a fast matrix for,
         # defer to the stock matrix path so we never silently mishandle a circuit.
@@ -132,14 +145,16 @@ class QuantumManagerKet(QuantumManagerDenseQubit):
         self._validate_circuit_run(circuit, keys, meas_samp)
 
         # --- Assemble the working statevector --------------------------------
-        # `keys` may span several separate KetStates (e.g. two memories that aren't
-        # entangled yet). Join the distinct ones into one flat vector via kron and
-        # record `all_keys` (the qubit order of that vector). This is the same
-        # state-combining step _prepare_circuit does -- minus building any operator.
-        old_states, all_keys = [], []
+        # `keys` may span several separate KetStates; kron the distinct ones into
+        # one flat vector and record `all_keys` (its qubit order). Dedup by state
+        # *object*, not by keys[0]: teleport collapses/merges can leave two distinct
+        # states sharing a keys[0], and keying on it would skip one -- dropping its
+        # qubits from `all_keys` (crashing the gate or orphaning keys on store).
+        old_states, all_keys, seen = [], [], set()
         for key in keys:
             qstate = self.states[key]
-            if qstate.keys[0] not in all_keys:     # skip keys already pulled in
+            if id(qstate) not in seen:             # skip states already pulled in
+                seen.add(id(qstate))
                 old_states.append(qstate.state)
                 all_keys += qstate.keys
         state = np.array([1], dtype=complex)
@@ -253,13 +268,29 @@ class QuantumManagerKet(QuantumManagerDenseQubit):
         self.set([key], [complex(0), complex(1)])
 
     def _measure(self, state, keys, all_keys, meas_samp):
-        """Single-qubit measurement by tracing out the measured axis (O(2^k))
-        instead of building full 2^k projector operators (the stock path's
-        O(4^k), which dominates runtime once gate application is contracted).
+        """Measure the qubit at `keys` and collapse the shared state accordingly.
 
-        Only the single-qubit case is accelerated -- that is every telegate Bell
-        measurement and every final-qubit readout. Multi-qubit measurement (rare
+        The single-qubit case is accelerated by tracing out the measured axis
+        (O(2^k)) instead of building full 2^k projector operators (the stock
+        path's O(4^k), which dominates runtime once gate application is
+        contracted). That single-qubit case covers every telegate Bell
+        measurement and every final-qubit readout; multi-qubit measurement (rare
         / unused here) falls back to the stock implementation in _old_measure.
+
+        The measured key is reassigned to a fresh single-qubit basis state and the
+        remaining qubits (if any) to the renormalized post-measurement branch,
+        mirroring _old_measure.
+
+        Args:
+            state (list[complex]): flat amplitudes of the combined state over
+                `all_keys` to measure.
+            keys (list[int]): key(s) to measure; only length 1 is accelerated.
+            all_keys (list[int]): qubit order of `state`; the measured key is
+                removed from this list in place.
+            meas_samp (float): random sample in [0, 1) selecting the outcome.
+
+        Returns:
+            dict[int, int]: mapping of the measured key to its outcome (0 or 1).
         """
         if len(keys) != 1:
             return self._old_measure(state, keys, all_keys, meas_samp)
