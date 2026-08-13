@@ -87,9 +87,16 @@ class RSVPProtocol(StackProtocol):
         self.timecards: list[MemoryTimeCard] = []
         self.purification_mode = 'until_target'  # once or until_target. QoS
         self.accepted_reservations = []
+        # Monotonic counter so every reservation this node initiates gets a UNIQUE
+        # identity. Without it, concurrent same-link reservations share params
+        # (responder/window/memory_size/fidelity) and compare equal, so their
+        # rule memory-index assignment collapses onto one comm memory -> only one
+        # of N concurrent reservations ever entangles. (initiator is part of
+        # Reservation equality, so a per-node counter is globally unique.)
+        self._identity_counter = 0
 
     def push(self, responder: str, start_time: int, end_time: int, memory_size: int, target_fidelity: float,
-             entanglement_number: int = 1, identity: int = 0):
+             entanglement_number: int = 1, identity: int = 0, app_label: str = ""):
         """Method to receive reservation requests from higher level protocol.
 
         Will evaluate the request and determine if the node can meet it.
@@ -108,8 +115,11 @@ class RSVPProtocol(StackProtocol):
             May push/pop to lower/upper attached protocols (or network manager).
         """
 
+        if identity == 0:  # default/unset -> assign a unique id so concurrent reservations stay distinct
+            self._identity_counter += 1
+            identity = self._identity_counter
         reservation = Reservation(self.owner.name, responder, start_time, end_time, memory_size, target_fidelity,
-                                  entanglement_number, identity)
+                                  entanglement_number, identity, app_label=app_label)
         if self.schedule(reservation):
             msg = RSVPMessage(RSVPMsgType.REQUEST, self.name, reservation)
             qcap = QCap(self.owner.name)

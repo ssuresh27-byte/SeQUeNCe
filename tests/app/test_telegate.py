@@ -125,22 +125,45 @@ def expected_cnot(a: np.ndarray, b: np.ndarray) -> np.ndarray:
                     dtype=complex)
 
 
-def single_trial(a_init: np.ndarray, b_init: np.ndarray, seeds=None):
+def expected_cz(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Calculate the expected result of a CZ operation.
+
+    For CZ: |control,target⟩ → (-1)^(control·target) |control,target⟩
+    - |00⟩ → |00⟩, |01⟩ → |01⟩, |10⟩ → |10⟩, |11⟩ → -|11⟩
+
+    Args:
+        a: Control qubit state vector
+        b: Target qubit state vector
+
+    Returns:
+        np.ndarray: Expected 4-element joint state after CZ
+    """
+    a0, a1 = a
+    b0, b1 = b
+    # Standard ordering: |00>, |01>, |10>, |11> (only |11> picks up a -1 phase)
+    return np.array([a0*b0, a0*b1, a1*b0, -a1*b1], dtype=complex)
+
+
+def single_trial(a_init: np.ndarray, b_init: np.ndarray, seeds=None, gate_type: str = "cx"):
     """
     Execute a single telegate operation between Alice and Bob.
-    
+
     This function sets up a 2-node network, prepares input states,
-    executes a telegate CNOT operation, and returns the quantum states
-    directly from the quantum state manager.
-    
+    executes a telegate controlled-gate operation, and returns the quantum
+    states directly from the quantum state manager.
+
     Args:
         a_init: Alice's initial control qubit state
         b_init: Bob's initial target qubit state
         seeds: Random seeds for reproducible results
-        
+        gate_type: Distributed gate to apply, "cx" (remote CNOT) or "cz"
+            (remote CZ).
+
     Returns:
-        tuple: (alice_state, bob_state) - Final quantum states from both nodes
-        
+        tuple: (alice_state, bob_state, expected) - Final quantum states from
+        both nodes and the expected joint state for the requested gate.
+
     Raises:
         RuntimeError: If telegate operation fails
     """
@@ -155,8 +178,8 @@ def single_trial(a_init: np.ndarray, b_init: np.ndarray, seeds=None):
     log.logger.info(f"[telegate_test]   b_init = {b_init}")
     log.logger.info(f"[telegate_test]   seeds = {seeds}")
     
-    # Calculate and log expected CNOT result
-    expected = expected_cnot(a_init, b_init)
+    # Calculate and log expected result for the requested gate
+    expected = expected_cz(a_init, b_init) if gate_type == "cz" else expected_cnot(a_init, b_init)
     log.logger.info(f"[telegate_test] Expected CNOT result:")
     for i, val in enumerate(expected):
         log.logger.info(f"[telegate_test]   [{i}] = {val}")
@@ -198,9 +221,9 @@ def single_trial(a_init: np.ndarray, b_init: np.ndarray, seeds=None):
     B.set_target_slot_for_step(0, 0)  # step=0, slot=0
     B._current_step = 0  # Set the current step for Bob
     
-    # Kick off telegate CNOT
-    A.start(responder=bob.name, start_t=10*MILLISECOND, end_t=100*MILLISECOND, 
-            memory_size=1, fidelity=0.8, control_src=0, target_src=0, step=0)
+    # Kick off telegate operation
+    A.start(responder=bob.name, start_t=10*MILLISECOND, end_t=100*MILLISECOND,
+            memory_size=1, fidelity=0.8, control_src=0, target_src=0, step=0, gate_type=gate_type)
     
     # Run the simulation
     tl.init()
@@ -691,3 +714,74 @@ def test_telegate_dual_randomized(a_init, b_init, seeds):
         print(f"  Charlie telegate failed")
     print(f"===============================\n")
     assert False
+
+def _matches_up_to_phase_and_perm(state: np.ndarray, expected: np.ndarray, tol: float = 1e-10) -> bool:
+    """True if `state` equals `expected` up to a global phase, allowing the
+    [0,2,1,3] basis relabeling the telegate harness may produce (same tolerance
+    the CNOT tests use)."""
+    def close_up_to_phase(s, e):
+        if np.allclose(s, e, atol=tol):
+            return True
+        phases = [s[i] / e[i] for i in range(len(e)) if abs(e[i]) > tol]
+        if not phases:
+            return False
+        if all(np.isclose(p, phases[0], atol=tol) for p in phases[1:]):
+            return np.allclose(s, phases[0] * e, atol=tol)
+        return False
+
+    permuted = np.array([expected[0], expected[2], expected[1], expected[3]])
+    return close_up_to_phase(state, expected) or close_up_to_phase(state, permuted)
+
+
+@pytest.mark.parametrize(
+    "a_init,b_init,seeds",
+    list(itertools.product(ALICE_PSIS, BOB_PSIS, SINGLE_SEEDS))
+)
+def test_telegate_single_cz_randomized(a_init, b_init, seeds):
+    """A remote CZ (gate_type="cz") must reproduce the ideal CZ on random inputs."""
+    alice_state, bob_state, expected = single_trial(a_init, b_init, seeds, gate_type="cz")
+    assert alice_state.shape == (4,) and bob_state.shape == (4,)
+    assert _matches_up_to_phase_and_perm(alice_state, expected), (
+        f"remote CZ mismatch\n got: {alice_state}\n expected: {expected}")
+
+
+def test_telegate_cz_differs_from_cx():
+    """Sanity check that "cz" is actually doing something different from "cx":
+    on |+>|+> a CZ produces an entangled state while a CX leaves |+>|+> unchanged."""
+    plus = np.array([1, 1], dtype=complex) / math.sqrt(2)
+    seeds = {"alice": 1, "bob": 2, "BSM_alice_bob": 3}
+
+    cz_state, _, cz_expected = single_trial(plus, plus, seeds, gate_type="cz")
+    assert _matches_up_to_phase_and_perm(cz_state, cz_expected)
+    # CZ on |+>|+> is entangled -> NOT equal to the separable CX result on |+>|+>.
+    cx_expected = expected_cnot(plus, plus)
+    assert not _matches_up_to_phase_and_perm(cz_state, cx_expected)
+
+
+def test_send_expire_rules_message_targets_only_intermediate_nodes():
+    """The initiator's early-expire fan-out must message the intermediate (swap)
+    nodes on the reservation path -- and only those, never the two endpoints -- and
+    be a no-op for a direct 2-node link."""
+    import types
+    from sequence.network_management.reservation import Reservation
+
+    sent = []
+    node = types.SimpleNamespace(
+        name="alice",
+        resource_manager=types.SimpleNamespace(
+            expire_remote_rules=lambda dst, reservation: sent.append(dst)))
+    app = object.__new__(TelegateApp)   # bypass heavyweight RequestApp.__init__
+    app.node = node
+
+    # Multi-hop path: only the in-between nodes should be messaged.
+    res = Reservation("alice", "bob", 1, 100, 1, 0.9)
+    res.set_path(["alice", "mid1", "mid2", "bob"])
+    app.send_expire_rules_message(res)
+    assert sent == ["mid1", "mid2"]
+
+    # Direct 2-node link: no intermediate nodes -> no messages.
+    sent.clear()
+    res_direct = Reservation("alice", "bob", 1, 100, 1, 0.9)
+    res_direct.set_path(["alice", "bob"])
+    app.send_expire_rules_message(res_direct)
+    assert sent == []

@@ -261,12 +261,15 @@ class ResourceManager:
             event = Event(reservation.end_time, process, self.owner.timeline.schedule_counter)
             self.owner.timeline.schedule(event)
 
+        '''
         for card in timecards:
             if reservation in card.reservations:
                 process = Process(self.owner.resource_manager, "update",
                                   [None, self.owner.components[memory_array_name][card.memory_index], "RAW"])
                 event = Event(reservation.end_time, process, self.owner.timeline.schedule_counter)
                 self.owner.timeline.schedule(event)
+        '''
+        
 
     def load(self, rule: Rule) -> bool:
         """Method to load rules for entanglement management.
@@ -305,6 +308,15 @@ class ResourceManager:
 
         log.logger.info(f'{self.owner.name} expire rule {rule}')
         created_protocols = self.rule_manager.expire(rule)
+
+        # A stale, already-expired rule (e.g. an early expired rule whose original
+        # end_time expiry still fires) returns None here and must NOT re-run the
+        # memory reset below, or it would reset a slot a newer reservation has since
+        # recycled -> clobbered live qubit.
+        if created_protocols is None:
+            log.logger.info(f'{self.owner.name} rule does not exist (already expired): {rule}')
+            return
+
         while created_protocols:
             protocol = created_protocols.pop()
             if protocol in self.waiting_protocols:
@@ -318,6 +330,14 @@ class ResourceManager:
 
             for memory in protocol.memories:
                 self.update(protocol, memory, MemoryInfo.RAW)
+
+        # Update the memory associated with the rule to RAW
+        memory_indices = rule.condition_args.get("memory_indices", ())
+        for memory_index in memory_indices:
+            memory = self.memory_manager.memory_array[memory_index]
+            info = self.memory_manager.get_info_by_memory(memory)
+            if info.state != MemoryInfo.RAW:
+                self.update(None, memory, MemoryInfo.RAW)
 
     def update(self, protocol: EntanglementProtocol | None, memory: Memory, state: str) -> None:
         """Method to update state of memory after completion of entanglement management protocol.
@@ -469,6 +489,7 @@ class ResourceManager:
             
             case ResourceManagerMsgType.EARLY_EXPIRE:
                 self.expire_rules_by_reservation(msg.reservation)
+                self.owner.network_manager.remove_reservation_from_timecards(msg.reservation)
 
     def memory_expire(self, memory: Memory):
         """Method to receive memory expiration events."""
@@ -539,6 +560,6 @@ class ResourceManager:
         for rule in self.rule_manager.rules:
             if rule.reservation == reservation:
                 rule_to_expire.append(rule)
-        
+
         for rule in rule_to_expire:
             self.expire(rule)

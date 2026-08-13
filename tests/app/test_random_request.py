@@ -11,7 +11,7 @@ class FakeNode(QuantumRouter):
         self.reserve_log = []
 
     def reserve_net_resource(self, responder: str, start_time: int, end_time: int, memory_size: int,
-                             target_fidelity: float) -> None:
+                             target_fidelity: float, *args, **kwargs) -> None:
         self.reserve_log.append(responder)
 
 

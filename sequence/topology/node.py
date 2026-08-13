@@ -451,7 +451,8 @@ class QuantumRouter(Node):
         self.app = app
 
     def reserve_net_resource(self, responder: str, start_time: int, end_time: int, memory_size: int,
-                             target_fidelity: float, entanglement_number: int = 1, identity: int = 0) -> None:
+                             target_fidelity: float, entanglement_number: int = 1, identity: int = 0,
+                             app_label: str = "") -> None:
         """Method to request a reservation.
 
         Can be used by local applications.
@@ -464,8 +465,9 @@ class QuantumRouter(Node):
             target_fidelity (float): desired fidelity of entanglement.
             entanglement_number (int): the number of entanglement that the request ask for (default 1).
             identity (int): the ID of the request (default 0).
+            app_label (str): app-layer tag stored on the reservation for callback routing.
         """
-        self.network_manager.request(responder, start_time, end_time, memory_size, target_fidelity, entanglement_number, identity)
+        self.network_manager.request(responder, start_time, end_time, memory_size, target_fidelity, entanglement_number, identity, app_label=app_label)
 
     def get_idle_memory(self, info: "MemoryInfo") -> None:
         """Method for application to receive available memories.

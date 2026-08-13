@@ -1,14 +1,18 @@
-"""Telegate (remote/distributed CNOT) protocol and app.
+"""Telegate (remote/distributed controlled-gate) protocol and app.
 
-Implements an entanglement-assisted distributed CNOT across two nodes:
+Implements an entanglement-assisted distributed controlled gate across two
+nodes. The gate is selectable via ``gate_type`` ("cx" for a remote CNOT, the
+default, or "cz" for a remote CZ):
 
 1. Alice: CNOT(control -> comm_A), measure(comm_A) -> a_bit, send a_bit to Bob.
-2. Bob: CNOT(comm_B -> target), H(comm_B), measure(comm_B) -> b_bit, apply X^a.
+2. Bob: <gate>(comm_B -> target), H(comm_B), measure(comm_B) -> b_bit, apply the
+   a-dependent correction (X^a for CX, Z^a for CZ).
 3. Bob: send ACK(a_bit, b_bit) to Alice.
 4. Alice: apply Z^b correction to the control qubit, complete.
 
-This matches the standard distributed CNOT with a Z correction on the control
-side (Alice) and an X correction on the target side (Bob).
+Both gates share the same cat-entangler (step 1) and cat-disentangler (the Z^b
+correction in step 4). Only Bob's local gate and his a-dependent target
+correction differ.
 
 Ported from the DQC ``telegate`` package, re-expressed as a
 :class:`TeleportationProtocol` registered under ``TELEGATE`` and grouped with its
@@ -56,6 +60,7 @@ class TelegateMessage(Message):
         - bob_comm_memory_name: Name of Bob's communication memory
         - a_bit: Alice's measurement of her comm qubit (0/1)
         - target_memory_index: Index of Bob's target memory
+        - gate_type: Distributed gate to apply on Bob's side ("cx" or "cz")
 
     ACK message contains:
         - reservation: Network reservation for the telegate operation
@@ -73,10 +78,11 @@ class TelegateMessage(Message):
             self.bob_comm_memory_name: str = kwargs['bob_comm_memory_name']
             self.a_bit: int = kwargs['a_bit']
             self.target_memory_index: int = kwargs.get('target_memory_index', 0)
+            self.gate_type: str = kwargs.get('gate_type', 'cx')
             self.string = (f'type={TelegateMsgType.A_MEAS_RESULT}, '
                            f'bob_comm_memory={self.bob_comm_memory_name}, '
                            f'a_bit={self.a_bit}, target_idx={self.target_memory_index}, '
-                           f'reservation={self.reservation}')
+                           f'gate_type={self.gate_type}, reservation={self.reservation}')
         elif msg_type is TelegateMsgType.ACK:
             self.reservation: Reservation = kwargs['reservation']
             self.bob_comm_memory_name: str = kwargs['bob_comm_memory_name']
@@ -116,6 +122,11 @@ class TelegateProtocol(TeleportationProtocol):
     _cnot = Circuit(2)
     _cnot.cx(0, 1)
 
+    # Bob: local controlled gate (comm_B → target). CNOT realizes a remote CX;
+    # CZ realizes a remote CZ. Both share the same cat-entangler/disentangler.
+    _cz = Circuit(2)
+    _cz.cz(0, 1)
+
     _hadamard = Circuit(1)
     _hadamard.h(0)
 
@@ -132,7 +143,8 @@ class TelegateProtocol(TeleportationProtocol):
     _x.x(0)
 
     def __init__(self, owner: DQCNode, alice: bool = False, control_memory_index: Optional[int] = None,
-                 target_memory_index: Optional[int] = None, remote_node_name: Optional[str] = None):
+                 target_memory_index: Optional[int] = None, remote_node_name: Optional[str] = None,
+                 gate_type: str = "cx"):
         """Initialize a telegate protocol instance.
 
         Args:
@@ -141,7 +153,14 @@ class TelegateProtocol(TeleportationProtocol):
             control_memory_index: Index of Alice's control qubit memory
             target_memory_index: Index of Bob's target qubit memory
             remote_node_name: Name of the remote node in this telegate operation
+            gate_type: Distributed gate to apply, "cx" (remote CNOT) or "cz"
+                (remote CZ). Only meaningful on Alice's side; Bob learns it from
+                the A_MEAS_RESULT message.
         """
+        gate_type = gate_type.lower()
+        if gate_type not in ("cx", "cz"):
+            raise ValueError(f"gate_type must be 'cx' or 'cz', got {gate_type!r}")
+        self.gate_type = gate_type
         if alice:
             name = (f"{owner.name}.telegate.{remote_node_name}."
                     f"ControlData[{control_memory_index}]toTargetData[{target_memory_index}]")
@@ -201,7 +220,8 @@ class TelegateProtocol(TeleportationProtocol):
         # 3. Send measurement result to Bob
         log.logger.debug(f"[telegate_protocol:{self.owner.name}] Sending A_MEAS_RESULT to {self.remote_node_name}")
         msg = TelegateMessage(TelegateMsgType.A_MEAS_RESULT, bob_comm_memory_name=self.bob_comm_memory_name,
-                              a_bit=a_bit, target_memory_index=self.target_memory_index, reservation=reservation)
+                              a_bit=a_bit, target_memory_index=self.target_memory_index,
+                              gate_type=self.gate_type, reservation=reservation)
         self.owner.send_message(self.remote_node_name, msg)
         log.logger.info(f"[telegate_protocol:{self.owner.name}] A_MEAS_RESULT sent successfully")
 
@@ -223,10 +243,12 @@ class TelegateProtocol(TeleportationProtocol):
         """Execute Bob's stage of the telegate protocol.
 
         Bob performs:
-        1. CNOT(comm_B → target)
+        1. Local controlled gate (comm_B → target): CNOT for a remote CX, CZ
+           for a remote CZ.
         2. H(comm_B)
         3. Measure comm_B to get b_bit
-        4. Apply X^a correction to target qubit
+        4. Apply the a-dependent correction to the target qubit: X^a for CX,
+           Z^a for CZ.
         5. Send ACK(a_bit, b_bit) to Alice
         6. Complete protocol
 
@@ -235,6 +257,12 @@ class TelegateProtocol(TeleportationProtocol):
         """
         log.logger.info(f"[telegate_protocol:{self.owner.name}] _bob_stage_with_a called")
         assert self.bob_comm_memory is not None, "Bob comm memory not set"
+
+        # Alice picks the distributed gate; Bob adopts it for this session. The
+        # cat-entangler/disentangler are identical for CX and CZ -- only Bob's
+        # local gate and his a-dependent target correction differ.
+        gate_type = getattr(msg, "gate_type", "cx")
+        self.gate_type = gate_type
 
         # Fetch target data key (on Bob side)
         data_arr = self.owner.get_component_by_name(self.owner.data_memo_arr_name)
@@ -247,11 +275,13 @@ class TelegateProtocol(TeleportationProtocol):
         log.logger.debug(f"[telegate_protocol:{self.owner.name}] State before CNOT - comm qubit: {comm_state_before}")
         log.logger.debug(f"[telegate_protocol:{self.owner.name}] State before CNOT - target qubit: {target_state_before}")
 
-        # 1. Apply CNOT
-        log.logger.debug(f"[telegate_protocol:{self.owner.name}] Applying CNOT gate: comm qubit (key={comm_key}) → target qubit (key={target_key})")
+        # 1. Apply the local controlled gate (CNOT for remote CX, CZ for remote CZ)
+        local_gate = TelegateProtocol._cz if gate_type == "cz" else TelegateProtocol._cnot
+        gate_name = gate_type.upper()
+        log.logger.debug(f"[telegate_protocol:{self.owner.name}] Applying {gate_name} gate: comm qubit (key={comm_key}) → target qubit (key={target_key})")
         rnd = self.owner.get_generator().random()
-        self.owner.timeline.quantum_manager.run_circuit(TelegateProtocol._cnot, [comm_key, target_key], rnd)
-        log.logger.debug(f"[telegate_protocol:{self.owner.name}] CNOT gate applied successfully")
+        self.owner.timeline.quantum_manager.run_circuit(local_gate, [comm_key, target_key], rnd)
+        log.logger.debug(f"[telegate_protocol:{self.owner.name}] {gate_name} gate applied successfully")
 
         # Log quantum state after CNOT
         comm_state_after = self.pretty_ket(self.owner.timeline.quantum_manager.get(comm_key).state)
@@ -277,23 +307,26 @@ class TelegateProtocol(TeleportationProtocol):
         b_bit = meas[comm_key]
         log.logger.debug(f"[telegate_protocol:{self.owner.name}] Communication qubit measurement result: b_bit={b_bit}")
 
-        # Step 4: Apply X^a correction (uses Alice's bit)
+        # Step 4: Apply the a-dependent correction on the target (uses Alice's
+        # bit). A remote CX corrects with X^a; a remote CZ corrects with Z^a.
+        corr_circuit = TelegateProtocol._z if gate_type == "cz" else TelegateProtocol._x
+        corr_name = "Z" if gate_type == "cz" else "X"
         log.logger.debug(f"[telegate_protocol:{self.owner.name}] Alice's measurement result: a_bit={msg.a_bit}")
         if msg.a_bit:
-            target_state_before_x = self.pretty_ket(self.owner.timeline.quantum_manager.get(target_key).state)
-            log.logger.debug(f"[telegate_protocol:{self.owner.name}] State before X correction - target qubit: {target_state_before_x}")
+            target_state_before_corr = self.pretty_ket(self.owner.timeline.quantum_manager.get(target_key).state)
+            log.logger.debug(f"[telegate_protocol:{self.owner.name}] State before {corr_name} correction - target qubit: {target_state_before_corr}")
 
-            log.logger.debug(f"[telegate_protocol:{self.owner.name}] Applying X correction to target qubit (key={target_key}) based on Alice's measurement")
+            log.logger.debug(f"[telegate_protocol:{self.owner.name}] Applying {corr_name} correction to target qubit (key={target_key}) based on Alice's measurement")
             rnd = self.owner.get_generator().random()
-            self.owner.timeline.quantum_manager.run_circuit(TelegateProtocol._x, [target_key], rnd)
-            log.logger.debug(f"[telegate_protocol:{self.owner.name}] X correction applied successfully")
+            self.owner.timeline.quantum_manager.run_circuit(corr_circuit, [target_key], rnd)
+            log.logger.debug(f"[telegate_protocol:{self.owner.name}] {corr_name} correction applied successfully")
 
-            target_state_after_x = self.pretty_ket(self.owner.timeline.quantum_manager.get(target_key).state)
-            log.logger.info(f"[telegate_protocol:{self.owner.name}] State after X correction - target qubit: {target_state_after_x}")
+            target_state_after_corr = self.pretty_ket(self.owner.timeline.quantum_manager.get(target_key).state)
+            log.logger.info(f"[telegate_protocol:{self.owner.name}] State after {corr_name} correction - target qubit: {target_state_after_corr}")
         else:
-            log.logger.debug(f"[telegate_protocol:{self.owner.name}] No X correction needed (Alice's measurement was 0)")
-            target_state_no_x = self.pretty_ket(self.owner.timeline.quantum_manager.get(target_key).state)
-            log.logger.info(f"[telegate_protocol:{self.owner.name}] State after measurement (no X correction) - target qubit: {target_state_no_x}")
+            log.logger.debug(f"[telegate_protocol:{self.owner.name}] No {corr_name} correction needed (Alice's measurement was 0)")
+            target_state_no_corr = self.pretty_ket(self.owner.timeline.quantum_manager.get(target_key).state)
+            log.logger.info(f"[telegate_protocol:{self.owner.name}] State after measurement (no {corr_name} correction) - target qubit: {target_state_no_corr}")
 
         # Send ACK to Alice (with both bits)
         log.logger.warning(f"[telegate_protocol:{self.owner.name}] About to send ACK: a_bit={msg.a_bit}, b_bit={b_bit}, target_key={target_key}")
@@ -442,17 +475,56 @@ class TelegateApp(RequestApp):
         self._target_slot_by_step: Dict[int, int] = {}
         self._current_step: Optional[int] = None
 
-    def remove_memo_reservation_map(self, index: int) -> None:
-        """Idempotent override of the base-class removal.
+        # Reservations (by unique identity) whose FIRST pair has already been
+        # bound to an Alice-side protocol. Lets get_memory tell a genuine NEW
+        # concurrent session (bind it to the next unstarted protocol) apart from
+        # an EXTRA purification pair of an already-running session (ignore it).
+        self._alice_started_reservations: set = set()
 
-        ``_early_expire`` clears a reservation's map entry as soon as the gate
-        completes, but the base class also schedules a removal at the
-        reservation's ``end_time`` (``RequestApp.schedule_reservation``). The
-        stock implementation does ``pop(index)``, which would ``KeyError`` on
-        that second, now-redundant call. Popping with a default makes the late
-        event a harmless no-op.
+    def remove_memo_reservation_map(self, index: int) -> None:
+        """Idempotent override of the base-class removal (pop with a default so a
+        redundant call can't ``KeyError``). Used by :meth:`_early_expire` for its
+        own on-time cleanup. The scheduled ``end_time`` removal instead goes
+        through the reservation-aware :meth:`remove_memo_reservation_map_for`.
         """
         self.memo_to_reservation.pop(index, None)
+
+    def remove_memo_reservation_map_for(self, index: int, reservation) -> None:
+        """Reservation-aware removal used for the base class's ``end_time`` event.
+
+        Every telegate on a node reuses the same comm-memory index, so all of
+        their ``end_time`` removals target the same slot. When windows overlap
+        (small ``dt``), an OLD reservation's ``end_time`` can fire AFTER the NEXT
+        telegate has already registered its own reservation on this index. The
+        stock index-only removal would then pop the *current* mapping, orphaning
+        the in-flight telegate: ``get_memory`` sees the index unmapped and drops
+        the entangled pair, so the gate never completes -> controller deadlock.
+
+        Guarding on identity makes the stale removal a true no-op: we only clear
+        the slot if it is still mapped to the reservation whose window ended.
+        """
+        if self.memo_to_reservation.get(index) is reservation:
+            self.memo_to_reservation.pop(index, None)
+
+    def schedule_reservation(self, reservation) -> None:
+        """Same add/remove scheduling as the base class, but the ``end_time``
+        removal is reservation-aware (see :meth:`remove_memo_reservation_map_for`)
+        so a stale removal cannot orphan a newer telegate that reuses the same
+        comm-memory index. The ``start_time`` add is unchanged.
+        """
+        if reservation.initiator == self.node.name:
+            self.path = reservation.path
+
+        for card in self.node.network_manager.get_timecards():
+            if reservation in card.reservations:
+                self.node.timeline.schedule(Event(
+                    reservation.start_time,
+                    Process(self, "add_memo_reservation_map",
+                            [card.memory_index, reservation])))
+                self.node.timeline.schedule(Event(
+                    reservation.end_time,
+                    Process(self, "remove_memo_reservation_map_for",
+                            [card.memory_index, reservation])))
 
     def on_complete(self, cb: Callable):
         """Register completion callback.
@@ -483,7 +555,7 @@ class TelegateApp(RequestApp):
         self._current_step = int(step)
 
     def start(self, responder: str, start_t: int, end_t: int, memory_size: int, fidelity: float,
-              control_src: int, target_src: int, step: Optional[int] = None):
+              control_src: int, target_src: int, step: Optional[int] = None, gate_type: str = "cx"):
         """Start a telegate session from the control owner (initiator).
 
         Args:
@@ -495,14 +567,17 @@ class TelegateApp(RequestApp):
             control_src: Index of control qubit memory
             target_src: Index of target qubit memory
             step: Optional step number for the operation
+            gate_type: Distributed gate to apply, "cx" (remote CNOT, default) or
+                "cz" (remote CZ). Bob learns the choice from Alice's message.
         """
         # Reserve entanglement window
         super().start(responder, start_t, end_t, memory_size, fidelity)
 
         # Create Alice-side protocol on the initiator (control owner)
-        log.logger.info(f"[telegate:{self.node.name}] Creating Alice protocol with remote_node_name={responder}")
+        log.logger.info(f"[telegate:{self.node.name}] Creating Alice protocol with remote_node_name={responder}, gate_type={gate_type}")
         protocol = TeleportationProtocol.create(owner=self.node, alice=True, control_memory_index=control_src,
-                                                target_memory_index=target_src, remote_node_name=responder, protocol_type=TELEGATE)
+                                                target_memory_index=target_src, remote_node_name=responder,
+                                                gate_type=gate_type, protocol_type=TELEGATE)
         if step is not None:
             protocol._step = step
         self.telegate_protocols.append(protocol)
@@ -532,8 +607,11 @@ class TelegateApp(RequestApp):
         """
         log.logger.info(f"[telegate:{getattr(info.memory.owner, 'name', 'unknown')}] get_memory called: index={info.index}, state={info.state}, memo_to_reservation={list(self.memo_to_reservation.keys())}")
 
-        if info.index not in self.memo_to_reservation or info.state != "ENTANGLED":
-            log.logger.warning(f"[telegate:{getattr(info.memory.owner, 'name', 'unknown')}] get_memory returning early: index in reservation={info.index in self.memo_to_reservation}, state is ENTANGLED={info.state == 'ENTANGLED'}")
+        # Accept a ready pair whether it was delivered directly (ENTANGLED) or via
+        # entanglement purification (PURIFIED) -- the latter happens on multi-hop
+        # paths where the swapped pair is purified up to target before delivery.
+        if info.index not in self.memo_to_reservation or info.state not in ("ENTANGLED", "PURIFIED"):
+            log.logger.warning(f"[telegate:{getattr(info.memory.owner, 'name', 'unknown')}] get_memory returning early: index in reservation={info.index in self.memo_to_reservation}, state={info.state}")
             return
 
         reservation = self.memo_to_reservation[info.index]
@@ -549,8 +627,21 @@ class TelegateApp(RequestApp):
         # Control side → Alice-role (CNOT control → comm, measure, Z-correct).
         if this_node == control_node:
             log.logger.info(f"[telegate:{this_node}] Looking for Alice protocol for target={target_node}")
+            # An EXTRA (purification) pair of a session already bound to a protocol:
+            # the gate runs ONCE, so ignore it (stays a clean Bell pair, torn down in
+            # _early_expire). Keyed on the reservation's UNIQUE identity so we don't
+            # confuse it with a genuine concurrent session to the same target.
+            if identity in self._alice_started_reservations:
+                return
             for protocol in list(self.telegate_protocols):
-                if (protocol.alice and protocol.owner.name == control_node and protocol.remote_node_name == target_node):
+                # Bind this NEW reservation's pair to the next UNSTARTED protocol.
+                # Skipping (not bailing on) already-started protocols is what lets
+                # multiple concurrent telegates to the same target each get their own.
+                if (protocol.alice and protocol.owner.name == control_node
+                        and protocol.remote_node_name == target_node
+                        and not getattr(protocol, "_alice_started", False)):
+                    protocol._alice_started = True
+                    self._alice_started_reservations.add(identity)
                     log.logger.info(f"[telegate:{this_node}] Found Alice protocol, calling alice_stage")
                     protocol.set_alice_comm_memory_name(getattr(info.memory, "name", None))
                     protocol.set_alice_comm_memory(info.memory)
@@ -647,6 +738,12 @@ class TelegateApp(RequestApp):
             log.logger.info(f"[telegate:{self.node.name}] early expire @ t={now:,} "
                             f"(reservation end_time={end_t:,}, early_by={end_t - now:,})")
 
+        # Expire this reservation's rules now. The end_time expiry scheduled in
+        # generate_load_rules is NOT cancelled -- it still fires ~one window later --
+        # but by then the rule is gone from the rule manager, so expire() sees a
+        # missing rule and returns early without resetting memory. That guard is what
+        # stops the stale expiry from resetting a comm memory a newer telegate has
+        # recycled -> orphaned qubit -> wrong answer (bug #2).
         self.node.resource_manager.expire_rules_by_reservation(reservation)
         # Free the reservation's slot in the per-memory timecards so the scheduler
         # knows the memory is available again before the window's end_time.
@@ -656,10 +753,48 @@ class TelegateApp(RequestApp):
         # is a no-op (see remove_memo_reservation_map).
         stale = [idx for idx, res in self.memo_to_reservation.items()
                  if res is reservation]
+        # Reset EVERY comm memory this reservation held to RAW -- not just the gate's
+        # one. With memory_size > 1 (e.g. purification over a multi-hop path) the
+        # reservation reserves several comm memories; the gate only consumes one, so
+        # a second/purification-measured pair can be left entangled on an unused comm
+        # memory. If not reset here it lingers, gets recycled by the next telegate,
+        # and accumulates into a multi-qubit state -> BSM "Unknown state" later.
+        mm = self.node.resource_manager.memory_manager
         for idx in stale:
+            mem = mm.memory_array[idx]
+            if mm.get_info_by_memory(mem).state != MemoryInfo.RAW:
+                self.node.resource_manager.update(None, mem, MemoryInfo.RAW)
             self.remove_memo_reservation_map(idx)
-        if comm_memory is not None:
+        # The gate's comm memory (may not be in memo_to_reservation by now) too.
+        if comm_memory is not None and mm.get_info_by_memory(comm_memory).state != MemoryInfo.RAW:
             self.node.resource_manager.update(None, comm_memory, MemoryInfo.RAW)
+
+        # If this node initiated the reservation, tell the intermediate (swap) nodes
+        # on the path to expire early too. Both endpoints free themselves locally
+        # (above); only the in-between nodes need the message. No-op for a direct
+        # 2-node link (path length <= 2).
+        if getattr(reservation, "initiator", None) == self.node.name:
+            self.send_expire_rules_message(reservation)
+
+    def send_expire_rules_message(self, reservation) -> None:
+        """Notify the intermediate (swap) nodes on the reservation path to expire
+        their rules early.
+
+        Only the nodes strictly between the initiator and responder are messaged;
+        the two endpoints free their own resources directly in :meth:`_early_expire`.
+        Each intermediate node receives an ``EARLY_EXPIRE`` message (via
+        :meth:`ResourceManager.expire_remote_rules`) and tears down its rules and
+        timecards for this reservation. No-op for a direct link (path length <= 2).
+
+        Args:
+            reservation (Reservation): reservation whose intermediate-node rules
+                should expire early.
+        """
+        path = getattr(reservation, "path", None) or []
+        if len(path) > 2:
+            for node_name in path[1:-1]:
+                log.logger.info(f"[telegate:{self.node.name}] sending EARLY_EXPIRE to intermediate node {node_name}")
+                self.node.resource_manager.expire_remote_rules(node_name, reservation)
 
     def _emit_complete(self, role: str, data_key: int, step: Optional[int] = None):
         """Emit completion events to all registered callbacks.

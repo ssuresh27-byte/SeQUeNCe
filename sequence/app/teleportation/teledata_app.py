@@ -139,8 +139,9 @@ class TeledataProtocol(TeleportationProtocol):
         meas = self.owner.timeline.quantum_manager.run_circuit(TeledataProtocol._bsm_circuit, [data_key, comm_key], rnd)
         z, x = meas[data_key], meas[comm_key]
 
+        dest_index = getattr(self, "dest_memory_index", self.data_memory_index)
         msg = TeledataMessage(TeledataMsgType.MEASUREMENT_RESULT, bob_comm_memory_name=self.bob_comm_memory_name,
-                              x_flip=x, z_flip=z, bob_data_memory_index=self.data_memory_index, reservation=reservation)
+                              x_flip=x, z_flip=z, bob_data_memory_index=dest_index, reservation=reservation)
         self.owner.send_message(self.remote_node_name, msg)
         log.logger.info(f"{self.name}: sent measurement results to {self.remote_node_name}: "
                         f"bob_comm_memory={self.bob_comm_memory_name}, x={x}, z={z}, reservation={reservation}")
@@ -189,10 +190,24 @@ class TeledataProtocol(TeleportationProtocol):
 
         # SWAP the teleported state from comm memory to data memory
         rnd = self.owner.get_generator().random()
-        self.owner.timeline.quantum_manager.run_circuit(TeledataProtocol._swap_circuit, 
+        self.owner.timeline.quantum_manager.run_circuit(TeledataProtocol._swap_circuit,
                                                         [bob_comm_memory_key, bob_data_memory_key], rnd)
         log.logger.info(f"{self.name}: SWAP applied - teleported state moved from comm to data memory slot {target_slot} "
                         f"(requested {msg.bob_data_memory_index})")
+
+        # After the swap the comm memory holds |0> but is still in the SAME quantum
+        # state group as the data qubit (a product state). MEASURE it to factor it
+        # out of the group, leaving the data qubit as a clean, standalone state --
+        # otherwise every leftover comm qubit stays attached and a SECOND teleport of
+        # this data qubit (or its reuse) operates on the joined multi-qubit state and
+        # corrupts it. The comm qubit is |0> here, so the measurement is a no-op on
+        # the data qubit; it just disentangles the (classical) comm register.
+        if getattr(TeledataProtocol, "_disentangle_measure", True):
+            _meas = Circuit(1)
+            _meas.measure(0)
+            rnd = self.owner.get_generator().random()
+            self.owner.timeline.quantum_manager.run_circuit(_meas, [bob_comm_memory_key], rnd)
+        self.bob_comm_memory.reset()
 
         # Notify app that the teleported state is now in the data memory
         self.owner.teledata_app.teledata_complete(bob_data_memory_key)
@@ -230,9 +245,16 @@ class TeledataApp(RequestApp):
         # Maintain multiple concurrent teledata sessions
         self.teledata_protocols: List[TeledataProtocol] = []
 
+        # Optional callback fired on the INITIATOR (Alice) once Bob acknowledges a
+        # completed teleport -- i.e. the moved state is now in Bob's data memory and
+        # this session's resources are released. DQCApp uses it to drive the barrier
+        # ACK / free the source slot. Signature: on_source_complete(protocol).
+        self.on_source_complete: Optional[callable] = None
+
         log.logger.debug(f"[TeledataApp:{node.name}] initialized")
 
-    def start(self, responder: str, start_t: int, end_t: int, memory_size: int, fidelity: float, data_src: int):
+    def start(self, responder: str, start_t: int, end_t: int, memory_size: int, fidelity: float, data_src: int,
+              dest_slot: Optional[int] = None):
         """Start a teledata session (this node acts as Alice).
 
         Args:
@@ -242,8 +264,12 @@ class TeledataApp(RequestApp):
             memory_size (int): number of memories to reserve.
             fidelity (float): target fidelity of the entangled pair.
             data_src (int): index of the local data qubit to teleport.
+            dest_slot (Optional[int]): data-memory slot on the responder to land the
+                state in. Defaults to ``data_src`` (mirror the source index) when None,
+                preserving the original behaviour; pass it explicitly to place the
+                moved qubit in a specific slot (needed by DQCApp qubit moves).
         """
-        log.logger.debug(f"[TeledataApp:{self.node.name}] start() → responder={responder}, data_src={data_src}")
+        log.logger.debug(f"[TeledataApp:{self.node.name}] start() → responder={responder}, data_src={data_src}, dest_slot={dest_slot}")
 
         # Reserve and generate EPR pair(s)
         super().start(responder, start_t, end_t, memory_size, fidelity)
@@ -251,7 +277,8 @@ class TeledataApp(RequestApp):
         # Create a new protocol instance for Alice
         protocol = TeleportationProtocol.create(owner=self.node, alice=True, data_memory_index=data_src,
                                                 remote_node_name=responder, protocol_type=TELEDATA)
-        
+        # Where the state should land on the responder (defaults to the source index).
+        protocol.dest_memory_index = data_src if dest_slot is None else dest_slot
         self.teledata_protocols.append(protocol)
 
     def get_reservation_result(self, reservation: Reservation, result: bool):
@@ -271,15 +298,36 @@ class TeledataApp(RequestApp):
             info (MemoryInfo): information about the memory state change.
         """
         log.logger.debug(f"{self.name}: get_memory(idx={info.index}, state={info.state})")
-        if info.index in self.memo_to_reservation and info.state == "ENTANGLED":
+        # Accept PURIFIED as well as ENTANGLED: when the reservation asks for a
+        # target fidelity above the raw pair fidelity (memory_size>1), the kept
+        # pair is distilled and its MemoryInfo transitions to PURIFIED, not
+        # ENTANGLED. Reacting only to ENTANGLED made purified teleports stall
+        # forever (never Bell-measured). Telegate already accepts both.
+        if info.index in self.memo_to_reservation and info.state in ("ENTANGLED", "PURIFIED"):
             reservation = self.memo_to_reservation[info.index]
 
-            # Try to match an existing Alice-side protocol
-            for protocol in list(self.teledata_protocols):
+            # Decide the ROLE for this pair from the reservation, not from
+            # (owner, remote_node): if this node INITIATED the pair's reservation it
+            # is the sender (Alice); otherwise it is the receiver (Bob). Matching by
+            # (owner, remote_node) alone is ambiguous when this node is BOTH Alice
+            # (sending to X) and Bob (receiving from X) at the same time -- e.g. a
+            # BIDIRECTIONAL teleport a<->b -- and would let the Alice protocol grab
+            # the Bob session's pair, so neither teleport ever completes (deadlock).
+            is_sender = reservation.initiator == self.node.name
+            # Try to match an existing Alice-side protocol. With several concurrent
+            # teleports to the SAME remote node, every un-fulfilled Alice session
+            # matches on (owner, remote_node); we give each ARRIVING EPR pair to a
+            # DISTINCT session by skipping ones that already claimed a pair
+            # (``_alice_started``), so pair k goes to the k-th session.
+            for protocol in (list(self.teledata_protocols) if is_sender else []):
                 this_node = getattr(info.memory.owner, 'name', None)
                 remote_node = getattr(info, 'remote_node', reservation.responder)
-                if this_node == protocol.owner.name and remote_node == protocol.remote_node_name:
-                    # Alice side
+                if (getattr(protocol, 'alice', False)
+                        and this_node == protocol.owner.name
+                        and remote_node == protocol.remote_node_name
+                        and not getattr(protocol, '_alice_started', False)):
+                    # Alice side -- this session now owns this EPR pair
+                    protocol._alice_started = True
                     protocol.set_alice_comm_memory_name(getattr(info.memory, 'name', None))
                     protocol.set_alice_comm_memory(info.memory)
                     protocol.set_bob_comm_memory_name(getattr(info, 'remote_memo', None))
@@ -294,6 +342,15 @@ class TeledataApp(RequestApp):
                     self.node.timeline.schedule(event)
                     break
             else:
+                # Only the RESPONDER receives the teleported state. On a multi-hop
+                # path the intermediate (entanglement-swap) nodes also hold comm
+                # memories mapped to this reservation and see them go ENTANGLED --
+                # but they are NOT teleport endpoints. Without this guard an
+                # intermediate would spin up a spurious Bob-side protocol and
+                # consume/corrupt the swap's comm memory (telegate already ignores
+                # non-endpoints the same way).
+                if self.node.name != reservation.responder:
+                    return
                 # Bob side: create a protocol instance and stash comm memory
                 protocol = TeleportationProtocol.create(owner=self.node, alice=False,
                                                         remote_node_name=reservation.initiator, protocol_type=TELEDATA)
@@ -318,6 +375,7 @@ class TeledataApp(RequestApp):
                     protocol.received_message(src, msg)
                     # Send ACK back to Alice and close Bob-side protocol
                     protocol.bob_acknowledge_complete(msg.reservation)
+                    self._early_expire(msg.reservation, getattr(protocol, "bob_comm_memory", None))
                     self.teledata_protocols.remove(protocol)
                     break
             else:
@@ -327,7 +385,12 @@ class TeledataApp(RequestApp):
             # Alice receives acknowledgment from Bob → close Alice-side protocol
             for protocol in list(self.teledata_protocols):
                 if src == protocol.remote_node_name and msg.bob_comm_memory_name == protocol.bob_comm_memory_name:
+                    self._early_expire(msg.reservation, getattr(protocol, "alice_comm_memory", None))
                     self.teledata_protocols.remove(protocol)
+                    # Notify the initiator-side app that this teleport fully completed
+                    # (Bob has the state). DQCApp uses this to release the barrier.
+                    if self.on_source_complete is not None:
+                        self.on_source_complete(protocol)
                     break
             else:
                 log.logger.warning(f"{self.name}: received_message: no matching teledata protocol for ACK from {src}")
@@ -351,3 +414,50 @@ class TeledataApp(RequestApp):
         log.logger.info(f"{self.name}: teledata done, state={psi}")
         self.data_keys.append(data_key)
         self.results.append(psi)
+
+    # ── early expire: release resources the instant a teleport completes, and
+    #    make the base class's end_time cleanup reservation-aware, so back-to-back
+    #    teleports (overlapping reservation windows at dt=0) don't orphan each
+    #    other's comm memory / timecards. Mirrors TelegateApp._early_expire.
+    def remove_memo_reservation_map(self, index: int) -> None:
+        """Idempotent override: pop with a default so a redundant call can't KeyError."""
+        self.memo_to_reservation.pop(index, None)
+
+    def remove_memo_reservation_map_for(self, index: int, reservation) -> None:
+        """Reservation-aware removal for the base class's end_time event: only clear
+        the slot if it is still mapped to the reservation whose window ended, so a
+        stale end_time firing can't orphan a newer teleport reusing the same index."""
+        if self.memo_to_reservation.get(index) is reservation:
+            self.memo_to_reservation.pop(index, None)
+
+    def schedule_reservation(self, reservation) -> None:
+        """Like the base, but the end_time removal is reservation-aware."""
+        if reservation.initiator == self.node.name:
+            self.path = reservation.path
+        for card in self.node.network_manager.get_timecards():
+            if reservation in card.reservations:
+                self.node.timeline.schedule(Event(
+                    reservation.start_time,
+                    Process(self, "add_memo_reservation_map", [card.memory_index, reservation])))
+                self.node.timeline.schedule(Event(
+                    reservation.end_time,
+                    Process(self, "remove_memo_reservation_map_for", [card.memory_index, reservation])))
+
+    def _early_expire(self, reservation, comm_memory) -> None:
+        """Release this teleport's resources at completion (not at end_time): expire
+        its RSVP rules, free its timecard slot, reset its comm memory to RAW, and
+        drop its memo_to_reservation entries -- so the next teleport on this link
+        can't collide with a finished session's still-open reservation window. On a
+        multi-hop path, the initiator also tells the intermediate (swap) nodes."""
+        rm = self.node.resource_manager
+        rm.expire_rules_by_reservation(reservation)
+        self.node.network_manager.remove_reservation_from_timecards(reservation)
+        mm = rm.memory_manager
+        if comm_memory is not None and mm.get_info_by_memory(comm_memory).state != MemoryInfo.RAW:
+            rm.update(None, comm_memory, MemoryInfo.RAW)
+        for idx in [i for i, res in list(self.memo_to_reservation.items()) if res is reservation]:
+            self.remove_memo_reservation_map(idx)
+        path = getattr(reservation, "path", None) or []
+        if getattr(reservation, "initiator", None) == self.node.name and len(path) > 2:
+            for nm in path[1:-1]:
+                rm.expire_remote_rules(nm, reservation)

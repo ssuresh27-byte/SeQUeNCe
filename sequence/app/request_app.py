@@ -65,7 +65,10 @@ class RequestApp:
         self.memo_size = memo_size
         self.fidelity = fidelity
 
-        self.node.reserve_net_resource(responder, start_t, end_t, memo_size, fidelity)
+        # Tag the reservation with this app's name so a node hosting several apps
+        # (e.g. DQCApp's telegate + teledata) can route callbacks to the right one.
+        self.node.reserve_net_resource(responder, start_t, end_t, memo_size, fidelity,
+                                       app_label=getattr(self, "name", ""))
 
     def get_reservation_result(self, reservation: Reservation, result: bool) -> None:
         """Method to receive reservation result from network manager. 

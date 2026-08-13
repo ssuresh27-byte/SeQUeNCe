@@ -23,7 +23,8 @@ class Reservation:
     """
 
     def __init__(self, initiator: str, responder: str, start_time: int,
-                 end_time: int, memory_size: int, fidelity: float, entanglement_number: int = 1, identity: int = 0):
+                 end_time: int, memory_size: int, fidelity: float, entanglement_number: int = 1, identity: int = 0,
+                 app_label: str = ""):
         """Constructor for the reservation class.
 
         Args:
@@ -47,6 +48,11 @@ class Reservation:
         self.fidelity = fidelity
         self.entanglement_number = entanglement_number
         self.identity = identity
+        # App-layer tag ('telegate_app' / 'teledata_app') so a node hosting BOTH
+        # apps can route reservation callbacks to the right one. Metadata only --
+        # deliberately NOT part of __eq__/__hash__. Propagates to the responder
+        # because the same Reservation object travels the RSVP message.
+        self.app_label = app_label
         self.path = []
         self.purification_mode: str = 'until_target'
         assert self.start_time < self.end_time
@@ -63,7 +69,8 @@ class Reservation:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Reservation):
             return False
-        return (other.initiator == self.initiator
+        return (other.identity == self.identity
+            and other.initiator == self.initiator
             and other.responder == self.responder
             and other.start_time == self.start_time
             and other.end_time == self.end_time
@@ -75,8 +82,8 @@ class Reservation:
         return self.identity < other.identity
 
     def __hash__(self):
-        return hash((self.initiator, self.responder, self.start_time, self.end_time, self.memory_size, 
-                     self.fidelity, self.entanglement_number))
+        return hash((self.identity, self.initiator, self.responder, self.start_time, self.end_time,
+                     self.memory_size, self.fidelity, self.entanglement_number))
     
     def set_path(self, path: list[str]):
         self.path = path

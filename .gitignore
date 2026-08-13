@@ -151,3 +151,7 @@ utils/json_config_generators/*.json
 
 # docstring files
 *.rst
+CLAUDE.md
+.gitignore
+PERFORMANCE_NOTES.md
+docs/design/shared_bsm_multinode.md

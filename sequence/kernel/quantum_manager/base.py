@@ -203,11 +203,19 @@ class QuantumManagerDenseQubit(QuantumManager):
         """
         old_states = []
         all_keys = []
+        seen = set()
 
-        # go through keys and get all unique qstate objects
+        # Go through keys and pull in each distinct qstate exactly once. Dedup by
+        # the state *object*, not by its first key: two memories can be different
+        # states that nonetheless share a keys[0] (e.g. after teleport-driven
+        # collapses/merges), and keying the dedup on keys[0] would then skip a
+        # genuinely distinct state, dropping its qubits from all_keys and crashing
+        # the circuit build. Identity dedup pulls in every distinct involved state
+        # exactly once, so all_keys always contains every key in `keys`.
         for key in keys:
             qstate = self.states[key]
-            if qstate.keys[0] not in all_keys:
+            if id(qstate) not in seen:
+                seen.add(id(qstate))
                 old_states.append(qstate.state)
                 all_keys += qstate.keys
 

@@ -4,8 +4,11 @@ import numpy
 from sequence.components.memory import MemoryArray
 from sequence.components.bsm import SingleAtomBSM
 from sequence.kernel.timeline import Timeline
+from sequence.kernel.event import Event
+from sequence.kernel.process import Process
 from sequence.resource_management.resource_manager import ResourceManager, ResourceManagerMessage, ResourceManagerMsgType
 from sequence.resource_management.rule_manager import Rule
+from sequence.network_management.reservation import Reservation
 from sequence.message import Message
 from sequence.topology.node import Node
 
@@ -250,13 +253,19 @@ def test_received_message():
 
 
 def test_expire():
+    def fake_action(_memories, _args):
+        raise AssertionError("fake_action should not be called during expiration")
+
+    def fake_condition(_memory_info, _manager, _args):
+        return []
+
     tl = Timeline()
     node = FakeNode("node", tl)
     tl.init()
 
     for info in node.resource_manager.memory_manager:
         info.to_occupied()
-    rule = Rule(0, None, None, None, None)
+    rule = Rule(0, fake_action, fake_condition, {}, {})
     memo_array = node.resource_manager.memory_manager.memory_array
     for i in range(6):
         memo_array[i].detach(memo_array)
@@ -302,6 +311,47 @@ def test_expire():
             assert isinstance(memory._observers.pop(), MemoryArray)
         elif i < 6:
             assert isinstance(memory._observers.pop(), FakeProtocol)
+
+
+def test_early_expire_stale_end_time_does_not_clobber_recycled_memory():
+    """Early-expire must not let a reservation's stale end_time expiry corrupt a
+    newer reservation that recycled the same memory index.
+
+    Timeline of the bug this guards against:
+      1. R1's session finishes early -> expire_rules_by_reservation(R1) removes R1's
+         rules NOW, but R1's original end_time `expire` event is still scheduled.
+      2. R2 recycles the same memory index and becomes ENTANGLED (live, in-flight).
+      3. R1's stale end_time event fires and calls expire(rule_R1) a second time.
+         Its memory reset must be a no-op on the already-expired rule; otherwise it
+         resets the recycled index to RAW and clobbers R2's live memory.
+    """
+    tl = Timeline()
+    node = FakeNode("node", tl)
+    tl.init()
+    rm = node.resource_manager
+    mm = rm.memory_manager
+    idx, end_t1 = 0, 100
+
+    # R1 owns a rule on the shared memory index, with an end_time expiry scheduled
+    # exactly as generate_load_rules would.
+    r1 = Reservation("node", "remote", start_time=1, end_time=end_t1,
+                     memory_size=1, fidelity=0.9)
+    rule1 = Rule(0, None, None, None, {"memory_indices": [idx]})
+    rule1.set_reservation(r1)
+    rm.rule_manager.load(rule1)
+    tl.schedule(Event(end_t1, Process(rm, "expire", [rule1]), tl.schedule_counter))
+
+    # R1 finishes early: expire its rules now (also frees the memory).
+    rm.expire_rules_by_reservation(r1)
+    assert mm[idx].state == "RAW"
+
+    # R2 recycles the same index and becomes entangled (still needs this memory).
+    mm[idx].to_entangled()
+
+    # Advance to R1's end_time: its stale expire event fires. R2's memory must survive.
+    tl.run()
+    assert mm[idx].state == "ENTANGLED", (
+        "R1's stale end_time expiry clobbered R2's recycled memory")
 
 
 def test_ResourceManager1():
