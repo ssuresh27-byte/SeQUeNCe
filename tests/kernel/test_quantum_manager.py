@@ -6,8 +6,10 @@ from numpy import array, eye
 import pytest
 import stim
 
-from sequence.kernel.quantum_state import StabilizerState
+from sequence.kernel.quantum_state import StabilizerState, KetState
 from sequence.kernel.quantum_manager import QuantumManagerDensity, QuantumManagerDensityFock, QuantumManagerKet, QuantumManagerStabilizer
+from sequence.kernel.quantum_utils import (measure_state_with_cache_ket, measure_entangled_state_with_cache_ket,
+                                           measure_multiple_with_cache_ket)
 from sequence.components.circuit import Circuit
 from sequence.constants import SECOND
 
@@ -125,6 +127,262 @@ def test_qmanager_circuit():
         ket2.state = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]]) @ ket2.state
 
     assert np.array_equal(qm.get(key1).state, qm.get(key3).state)
+
+
+def test_qmanager_circuit_dedups_states_by_identity_not_first_key():
+    """Regression: run_circuit assembles its working state by deduping the
+    involved KetStates on object identity, not on their first key.
+
+    Mid-teleport (Bell-measurement collapses/merges) the manager can transiently
+    hold two *distinct* KetState objects whose ``.keys`` lists share a first key.
+    Deduping the assembly loop on ``qstate.keys[0]`` would treat the second state
+    as already-seen and skip it -- dropping its qubits from ``all_keys`` and, on
+    the no-measurement store path, orphaning those keys (they keep pointing at the
+    stale object while the rest move to the merged ket). Identity dedup pulls in
+    every distinct involved state exactly once, so every input key ends up sharing
+    the merged ket.
+    """
+    qm = QuantumManagerKet()
+
+    # Two distinct states sharing first key 11; state_a's listing of 11 is stale.
+    state_a = KetState([1, 0, 0, 0], [10, 11])
+    state_b = KetState([1, 0, 0, 0], [11, 12])
+    qm.states = {10: state_a, 11: state_b, 12: state_b}
+
+    # No measurement; gate touches only key 10, so the run turns purely on dedup.
+    circuit = Circuit(2)
+    circuit.x(0)
+    qm.run_circuit(circuit, [10, 12])
+
+    # All involved keys share one merged ket; first-key dedup would orphan key 12.
+    merged = qm.get(10)
+    assert qm.get(11) is merged
+    assert qm.get(12) is merged
+
+
+def _reference_run_circuit(qm, circuit, keys, meas_samp=None):
+    """Stock matrix-path circuit execution -- the pre-optimization reference for the
+    fast run_circuit. Builds the full circuit unitary (via _prepare_circuit / qutip)
+    and applies it, measuring through _reference_measure. Kept in the test so the
+    production manager doesn't have to carry this second code path.
+    """
+    qm._validate_circuit_run(circuit, keys, meas_samp)
+    new_state, all_keys, circ_mat = qm._prepare_circuit(circuit, keys)
+    new_state = circ_mat @ new_state
+    if len(circuit.measured_qubits) == 0:
+        new_ket = KetState(new_state, all_keys)
+        for key in all_keys:
+            qm.states[key] = new_ket
+        return {}
+    meas_keys = [all_keys[i] for i in circuit.measured_qubits]
+    return _reference_measure(qm, new_state, meas_keys, all_keys, meas_samp)
+
+
+def _reference_measure(qm, state, keys, all_keys, meas_samp):
+    """Stock projector-based measurement -- the reference for the fast _measure
+    (formerly QuantumManagerKet._old_measure). Handles single- and multi-qubit
+    measurement by building the projected states via the cached utilities.
+    """
+    if len(keys) == 1:
+        if len(all_keys) == 1:
+            prob_0 = measure_state_with_cache_ket(tuple(state))
+            result = 0 if meas_samp < prob_0 else 1
+        else:
+            state_index = all_keys.index(keys[0])
+            state_0, state_1, prob_0 = measure_entangled_state_with_cache_ket(
+                tuple(state), state_index, len(all_keys))
+            new_state = np.array(state_0 if meas_samp < prob_0 else state_1, dtype=complex)
+            result = 0 if meas_samp < prob_0 else 1
+        all_keys.remove(keys[0])
+    else:
+        if not all([all_keys.index(key) == i for i, key in enumerate(keys)]):
+            all_keys, swap_mat = qm._swap_qubits(all_keys, keys)
+            state = swap_mat @ state
+        len_diff = len(all_keys) - len(keys)
+        new_states, probabilities = measure_multiple_with_cache_ket(tuple(state), len(keys), len_diff)
+        for i in range(int(2 ** len(keys))):
+            if meas_samp < sum(probabilities[:i + 1]):
+                result = i
+                new_state = new_states[i]
+                break
+        for key in keys:
+            all_keys.remove(key)
+
+    result_states = [np.array([1, 0]), np.array([0, 1])]
+    result_digits = [int(x) for x in bin(result)[2:]]
+    while len(result_digits) < len(keys):
+        result_digits.insert(0, 0)
+    for res, key in zip(result_digits, keys):
+        qm.states[key] = KetState(result_states[res], [key])
+    if len(all_keys) > 0:
+        new_state_obj = KetState(new_state, all_keys)
+        for key in all_keys:
+            qm.states[key] = new_state_obj
+    return dict(zip(keys, result_digits))
+
+
+# (size, gate-builder). Each builds the same circuit, run through both the fast
+# contraction path (run_circuit) and the stock matrix-path reference above.
+_EQUIV_CIRCUITS = [
+    (1, lambda c: c.x(0)),
+    (1, lambda c: c.h(0)),
+    (1, lambda c: (c.t(0), c.s(0), c.sdg(0), c.phase(0, 0.7))),
+    (1, lambda c: (c.root_iZ(0), c.minus_root_iZ(0))),
+    (1, lambda c: (c.root_iY(0), c.minus_root_iY(0))),
+    (2, lambda c: (c.h(0), c.cx(0, 1))),
+    (2, lambda c: (c.x(0), c.cz(0, 1))),
+    (2, lambda c: c.swap(0, 1)),
+    (2, lambda c: (c.h(0), c.h(1), c.cz(0, 1), c.y(0), c.z(1))),
+    (3, lambda c: (c.h(0), c.cx(0, 1), c.ccx(0, 1, 2))),
+]
+
+
+@pytest.mark.parametrize("size, build", _EQUIV_CIRCUITS)
+def test_fast_run_circuit_matches_reference(size, build):
+    """The fast contraction path produces the same state as the stock matrix path."""
+    keys = list(range(size))
+
+    qm_fast = QuantumManagerKet()
+    for _ in range(size):
+        qm_fast.new()
+    circuit_fast = Circuit(size)
+    build(circuit_fast)
+    qm_fast.run_circuit(circuit_fast, keys)
+
+    qm_ref = QuantumManagerKet()
+    for _ in range(size):
+        qm_ref.new()
+    circuit_ref = Circuit(size)
+    build(circuit_ref)
+    _reference_run_circuit(qm_ref, circuit_ref, keys)
+
+    # Normalize qubit ordering (paths may store keys in different orders), then
+    # compare amplitudes directly.
+    state_fast = qm_fast.get_ascending_keys(keys[0]).state
+    state_ref = qm_ref.get_ascending_keys(keys[0]).state
+    assert np.allclose(state_fast, state_ref)
+
+
+@pytest.mark.parametrize("samp", [0.05, 0.5, 0.95])
+def test_fast_measure_matches_reference(samp):
+    """The fast _measure agrees with the projector reference on an entangled state."""
+    def make_bell():
+        qm = QuantumManagerKet()
+        qm.new()
+        qm.new()
+        circuit = Circuit(2)
+        circuit.h(0)
+        circuit.cx(0, 1)
+        qm.run_circuit(circuit, [0, 1])   # (|00> + |11>) / sqrt(2)
+        return qm
+
+    key, other = 0, 1
+    qm_fast = make_bell()
+    qm_ref = make_bell()
+
+    res_fast = qm_fast._measure(
+        np.array(qm_fast.get(key).state, dtype=complex), [key], list(qm_fast.get(key).keys), samp)
+    res_ref = _reference_measure(
+        qm_ref, np.array(qm_ref.get(key).state, dtype=complex), [key], list(qm_ref.get(key).keys), samp)
+
+    assert res_fast == res_ref                                          # same outcome
+    assert np.allclose(qm_fast.get(key).state, qm_ref.get(key).state)   # measured qubit collapsed the same
+    assert np.allclose(qm_fast.get(other).state, qm_ref.get(other).state)  # partner qubit collapsed the same
+
+
+@pytest.mark.parametrize("samp", [0.2, 0.8])
+def test_fast_measure_matches_reference_single_qubit(samp):
+    """The fast _measure agrees with the projector reference on a lone qubit."""
+    def make_plus():
+        qm = QuantumManagerKet()
+        qm.new()
+        circuit = Circuit(1)
+        circuit.h(0)
+        qm.run_circuit(circuit, [0])      # (|0> + |1>) / sqrt(2)
+        return qm
+
+    qm_fast = make_plus()
+    qm_ref = make_plus()
+
+    res_fast = qm_fast._measure(np.array(qm_fast.get(0).state, dtype=complex), [0], [0], samp)
+    res_ref = _reference_measure(qm_ref, np.array(qm_ref.get(0).state, dtype=complex), [0], [0], samp)
+
+    assert res_fast == res_ref
+    assert np.allclose(qm_fast.get(0).state, qm_ref.get(0).state)
+
+
+def _projector_measure_reference(psi, meas_keys, all_keys, samp):
+    """Independent projective measurement, from first principles (Born rule).
+
+    Measures `meas_keys` out of the state `psi` (flat amplitudes over `all_keys`,
+    big-endian so all_keys[0] is the most-significant qubit). Outcomes are ordered
+    with the measured keys as the high bits, in `meas_keys` order -- the same
+    convention QuantumManagerKet uses -- so this can be compared to the manager
+    directly.
+
+    Returns:
+        tuple: (result dict {key: bit}, collapsed remainder amplitudes or None,
+            list of remainder keys in `all_keys` order).
+    """
+    n = len(all_keys)
+    tensor = np.asarray(psi, dtype=complex).reshape([2] * n)
+    m = len(meas_keys)
+    meas_axes = [all_keys.index(k) for k in meas_keys]
+    rem_keys = [k for k in all_keys if k not in meas_keys]
+
+    probs, branches = [], []
+    for i in range(2 ** m):
+        bits = [(i >> (m - 1 - t)) & 1 for t in range(m)]      # meas_keys[0] = high bit
+        idx = [slice(None)] * n
+        for ax, bit in zip(meas_axes, bits):
+            idx[ax] = bit
+        branch = tensor[tuple(idx)]                            # amplitudes over rem_keys
+        probs.append(float(np.vdot(branch, branch).real))
+        branches.append(branch)
+
+    outcome = int(np.searchsorted(np.cumsum(probs), samp, side="right"))
+    bits = [(outcome >> (m - 1 - t)) & 1 for t in range(m)]
+    result = dict(zip(meas_keys, bits))
+    remainder = None
+    if rem_keys:
+        remainder = (branches[outcome] / np.sqrt(probs[outcome])).reshape(-1)
+    return result, remainder, rem_keys
+
+
+@pytest.mark.parametrize("samp", [0.1, 0.35, 0.55, 0.9])
+def test_multi_qubit_measure_matches_projector_reference(samp):
+    """Multi-qubit measurement (the teleportation BSM path) matches a projector reference.
+
+    Reproduces the teledata pre-measurement state -- a data qubit entangled with a
+    Bell pair, after Alice's BSM gates -- then measures the two BSM qubits (0, 1)
+    out of the 3-qubit state and checks outcome, collapsed measured qubits, and the
+    remaining (teleported) qubit against an independent Born-rule computation.
+    """
+    a, b = np.sqrt(0.3), np.sqrt(0.7)
+    data = np.array([a, b], dtype=complex)                      # qubit 0
+    bell = np.array([1, 0, 0, 1], dtype=complex) / np.sqrt(2)   # qubits 1, 2
+    psi = np.kron(data, bell)                                   # 3-qubit, order [0, 1, 2]
+
+    # Alice's BSM gates on qubits 0, 1: CX(0->1) then H(0), as full 8x8 operators
+    # (CX01 acts on qubits 0,1 -> tensor I on qubit 2; H acts on qubit 0 -> tensor I4).
+    I2 = np.eye(2, dtype=complex)
+    H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+    CX01 = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]], dtype=complex)
+    psi = np.kron(H, np.eye(4)) @ np.kron(CX01, I2) @ psi
+
+    keys, meas_keys = [0, 1, 2], [0, 1]
+
+    qm = QuantumManagerKet()
+    qm.set(keys, psi.tolist())
+    result = qm._measure(np.array(psi, dtype=complex), meas_keys, list(keys), samp)
+
+    ref_result, ref_remainder, rem_keys = _projector_measure_reference(psi, meas_keys, keys, samp)
+
+    assert result == ref_result
+    for k in meas_keys:
+        expected = np.array([1, 0]) if ref_result[k] == 0 else np.array([0, 1])
+        assert np.allclose(qm.get(k).state, expected)
+    assert np.allclose(qm.get(rem_keys[0]).state, ref_remainder)   # teleported qubit
 
 
 def test_qmanager_circuit_density():

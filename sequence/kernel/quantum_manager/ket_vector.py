@@ -6,16 +6,10 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from numpy import array
 
 from .base import QuantumManager, QuantumManagerDenseQubit
 from ..quantum_state import KetState, OneDimensionInput
-from ..quantum_utils import measure_entangled_state_with_cache_ket, measure_multiple_with_cache_ket, measure_state_with_cache_ket
 from ...constants import KET_VECTOR_FORMALISM
-
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from ...components.circuit import Circuit
 
 
 # --- Fast gate-contraction helpers -------------------------------------------
@@ -43,12 +37,19 @@ _CZ = np.diag([1, 1, 1, -1]).astype(complex)
 _SWAP = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=complex)
 _CCX = np.eye(8, dtype=complex)
 _CCX[[6, 7]] = _CCX[[7, 6]]   # flip target when both controls = 1
+_ROOT_IZ = _INV_SQRT2 * np.array([[1 + 1j, 0], [0, 1 - 1j]], dtype=complex)
+_MINUS_ROOT_IZ = _INV_SQRT2 * np.array([[1 - 1j, 0], [0, 1 + 1j]], dtype=complex)
+_ROOT_IY = _INV_SQRT2 * np.array([[1, 1], [-1, 1]], dtype=complex)
+_MINUS_ROOT_IY = _INV_SQRT2 * np.array([[1, -1], [1, 1]], dtype=complex)
 
 # name -> (matrix-or-builder, num_qubits). A builder is callable(arg)->matrix.
+# Names match the gate names Circuit emits (see components/circuit.py).
 _FIXED = {
     "h": (_H, 1), "x": (_X, 1), "y": (_Y, 1), "z": (_Z, 1),
     "s": (_S, 1), "sdg": (_SDG, 1), "t": (_T, 1),
     "cx": (_CX, 2), "cz": (_CZ, 2), "swap": (_SWAP, 2), "ccx": (_CCX, 3),
+    "root_iZ": (_ROOT_IZ, 1), "minus_root_iZ": (_MINUS_ROOT_IZ, 1),
+    "root_iY": (_ROOT_IY, 1), "minus_root_iY": (_MINUS_ROOT_IY, 1),
 }
 
 
@@ -115,12 +116,11 @@ class QuantumManagerKet(QuantumManagerDenseQubit):
         return key
 
     def run_circuit(self, circuit, keys, meas_samp=None):
-        """Apply a circuit to the qubits named by `keys` via the fast path.
+        """Apply a circuit to the qubits named by `keys`.
 
         Each gate is applied by tensor contraction instead of building the full
-        2^n operator -- same contract as old_run_circuit, but O(2^n) per gate
-        rather than O(4^n). Any gate without a fast matrix falls back to
-        old_run_circuit so no circuit is silently mishandled.
+        2^n operator: O(2^n) per gate rather than O(4^n). Every gate Circuit can
+        emit has a fast matrix in `_FIXED`; an unrecognized gate raises.
 
         Args:
             circuit (Circuit): quantum circuit to apply.
@@ -134,14 +134,15 @@ class QuantumManagerKet(QuantumManagerDenseQubit):
                 empty dict when the circuit performs no measurement.
         """
 
-        # Fallback: if the circuit uses any gate we don't have a fast matrix for,
-        # defer to the stock matrix path so we never silently mishandle a circuit.
-        if any(g[0] not in _SUPPORTED for g in circuit.gates):
-            return self.old_run_circuit(circuit, keys, meas_samp)
+        # Every gate must have a fast matrix; there is no other path. This mirrors
+        # the set of gates Circuit can emit, so it should never trigger in practice.
+        unsupported = [g[0] for g in circuit.gates if g[0] not in _SUPPORTED]
+        if unsupported:
+            raise NotImplementedError(
+                f"QuantumManagerKet.run_circuit received unsupported gate(s): {unsupported}")
 
-        # Run only the input assertions (circuit size matches len(keys); meas_samp
-        # present when measuring) -- the same preamble old_run_circuit runs before
-        # its matrix path, which is the path we're replacing below.
+        # Input assertions: circuit size matches len(keys); meas_samp present when
+        # measuring.
         self._validate_circuit_run(circuit, keys, meas_samp)
 
         # --- Assemble the working statevector --------------------------------
@@ -183,34 +184,6 @@ class QuantumManagerKet(QuantumManagerDenseQubit):
         # Measurement: circuit.measured_qubits are positions in `keys`.
         meas_keys = [keys[i] for i in circuit.measured_qubits]
         return self._measure(flat, meas_keys, all_keys, meas_samp)
-
-    def old_run_circuit(self, circuit: Circuit, keys: list[int], meas_samp=None) -> dict[int, int]:
-        """Method to run a circuit on a given list of keys.
-
-        Args:
-            circuit (Circuit): quantum circuit to apply.
-            keys (list[int]): list of keys to apply circuit to.
-            meas_samp (float): random sample used for measurement result.
-
-        Returns:
-            If measurement, dict[int, int]: dictionary mapping qstate keys to measurement results.
-            If non-measurement, dict: empty dictionary.
-        """
-        self._validate_circuit_run(circuit, keys, meas_samp)
-        new_state, all_keys, circ_mat = self._prepare_circuit(circuit, keys)
-
-        new_state = circ_mat @ new_state
-
-        if len(circuit.measured_qubits) == 0:
-            # set state, return no measurement result
-            new_ket = KetState(new_state, all_keys)
-            for key in all_keys:
-                self.states[key] = new_ket
-            return {}
-        else:
-            # measure state (state reassignment done in _measure method)
-            keys = [all_keys[i] for i in circuit.measured_qubits]
-            return self._measure(new_state, keys, all_keys, meas_samp)
 
     def set(self, keys: list[int], amplitudes: OneDimensionInput) -> None:
         """Set the quantum state for the given keys.
@@ -268,133 +241,58 @@ class QuantumManagerKet(QuantumManagerDenseQubit):
         self.set([key], [complex(0), complex(1)])
 
     def _measure(self, state, keys, all_keys, meas_samp):
-        """Measure the qubit at `keys` and collapse the shared state accordingly.
+        """Measure the qubits at `keys` and collapse the shared state accordingly.
 
-        The single-qubit case is accelerated by tracing out the measured axis
-        (O(2^k)) instead of building full 2^k projector operators (the stock
-        path's O(4^k), which dominates runtime once gate application is
-        contracted). That single-qubit case covers every telegate Bell
-        measurement and every final-qubit readout; multi-qubit measurement (rare
-        / unused here) falls back to the stock implementation in _old_measure.
+        Measurement is done by tracing out the measured axes (O(2^k)) rather than
+        building full 2^k projector operators (the stock path's O(4^k), which
+        dominates runtime once gate application is contracted). This handles any
+        number of measured qubits `m`: the single-qubit telegate/readout case is
+        just `m == 1`, and the two-qubit teleportation Bell measurement is `m == 2`.
 
-        The measured key is reassigned to a fresh single-qubit basis state and the
-        remaining qubits (if any) to the renormalized post-measurement branch,
-        mirroring _old_measure.
+        The measured axes are moved to the front and flattened into one 2^m outcome
+        index (with `keys[0]` as the most-significant bit); each outcome's Born
+        probability is the squared norm of its branch over the remaining qubits.
+        After sampling an outcome, each measured key is reassigned to its basis
+        state and the remaining qubits (if any) to the renormalized branch.
 
         Args:
             state (list[complex]): flat amplitudes of the combined state over
                 `all_keys` to measure.
-            keys (list[int]): key(s) to measure; only length 1 is accelerated.
-            all_keys (list[int]): qubit order of `state`; the measured key is
-                removed from this list in place.
+            keys (list[int]): keys to measure, in outcome bit order (keys[0] is the
+                most-significant bit).
+            all_keys (list[int]): qubit order of `state`.
             meas_samp (float): random sample in [0, 1) selecting the outcome.
 
         Returns:
-            dict[int, int]: mapping of the measured key to its outcome (0 or 1).
+            dict[int, int]: mapping of each measured key to its outcome (0 or 1).
         """
-        if len(keys) != 1:
-            return self._old_measure(state, keys, all_keys, meas_samp)
-
-        key = keys[0]
+        m = len(keys)
         k = len(all_keys)
-        arr = np.asarray(state, dtype=complex)
+        arr = np.asarray(state, dtype=complex).reshape((2,) * k)
 
-        if k == 1:
-            prob_0 = float((arr[0].conjugate() * arr[0]).real)
-            result = 0 if meas_samp < prob_0 else 1
-            new_state = None
-        else:
-            ax = all_keys.index(key)
-            t = np.moveaxis(arr.reshape((2,) * k), ax, 0)   # measured axis to front
-            slice0, slice1 = t[0], t[1]                      # (k-1)-qubit branches
-            prob_0 = float(np.vdot(slice0, slice0).real)
-            if meas_samp < prob_0:
-                result = 0
-                new_state = (slice0 / np.sqrt(prob_0)).reshape(-1)
-            else:
-                result = 1
-                new_state = (slice1 / np.sqrt(1.0 - prob_0)).reshape(-1)
+        # Move the measured axes to the front (in `keys` order) and flatten them
+        # into a single 2^m outcome index; the remaining qubits become the columns.
+        # Row r then enumerates joint outcomes with keys[0] as the most-significant
+        # bit -- the manager's outcome convention.
+        meas_axes = [all_keys.index(key) for key in keys]
+        t = np.moveaxis(arr, meas_axes, range(m)).reshape(2 ** m, -1)
 
-        all_keys.remove(key)
+        # Born-rule probability per outcome (squared norm of each branch), then
+        # sample the cumulative distribution the same way the stock path does.
+        probs = np.einsum("ij,ij->i", t.conjugate(), t).real
+        result = int(np.searchsorted(np.cumsum(probs), meas_samp, side="right"))
+        result = min(result, 2 ** m - 1)                 # guard float round-off near 1.0
+        bits = [(result >> (m - 1 - j)) & 1 for j in range(m)]
 
-        # Reassign states exactly as the stock _old_measure does.
+        # Reassign each measured key to its basis state, and the remaining qubits
+        # (if any) to the renormalized post-measurement branch.
         basis = (np.array([1, 0], dtype=complex), np.array([0, 1], dtype=complex))
-        self.states[key] = KetState(basis[result], [key])
-        if len(all_keys) > 0:
-            new_obj = KetState(new_state, all_keys)
-            for rem in all_keys:
+        for key, bit in zip(keys, bits):
+            self.states[key] = KetState(basis[bit], [key])
+        rem_keys = [key for key in all_keys if key not in keys]
+        if rem_keys:
+            new_state = (t[result] / np.sqrt(probs[result])).reshape(-1)
+            new_obj = KetState(new_state, rem_keys)
+            for rem in rem_keys:
                 self.states[rem] = new_obj
-        return {key: result}
-
-    def _old_measure(self, state: list[complex], keys: list[int], all_keys: list[int], meas_samp: float) -> dict[int, int]:
-        """Method to measure qubits at given keys.
-
-        SHOULD NOT be called individually; only from circuit method (unless for unit testing purposes).
-        Modifies quantum state of all qubits given by all_keys.
-
-        Args:
-            state (list[complex]): state to measure.
-            keys (list[int]): list of keys to measure.
-            all_keys (list[int]): list of all keys corresponding to state.
-            meas_samp (float): random number between 0 and 1 used for measurement.
-
-        Returns:
-            dict[int, int]: mapping of measured keys to measurement results.
-        """
-        if len(keys) == 1:
-            if len(all_keys) == 1:
-                prob_0 = measure_state_with_cache_ket(tuple(state))
-                if meas_samp < prob_0:
-                    result = 0
-                else:
-                    result = 1
-            else:
-                key = keys[0]
-                num_states = len(all_keys)
-                state_index = all_keys.index(key)
-                state_0, state_1, prob_0 = measure_entangled_state_with_cache_ket(tuple(state), state_index, num_states)
-                if meas_samp < prob_0:
-                    new_state = array(state_0, dtype=complex)
-                    result = 0
-                else:
-                    new_state = array(state_1, dtype=complex)
-                    result = 1
-
-            all_keys.remove(keys[0])
-
-        else:
-            # swap states into correct position
-            if not all([all_keys.index(key) == i for i, key in enumerate(keys)]):
-                all_keys, swap_mat = self._swap_qubits(all_keys, keys)
-                state = swap_mat @ state
-
-            # calculate meas probabilities and projected states
-            len_diff = len(all_keys) - len(keys)
-            new_states, probabilities = measure_multiple_with_cache_ket(tuple(state), len(keys), len_diff)
-
-            # choose result, set as new state
-            for i in range(int(2 ** len(keys))):
-                if meas_samp < sum(probabilities[:i + 1]):
-                    result = i
-                    new_state = new_states[i]
-                    break
-
-            for key in keys:
-                all_keys.remove(key)
-
-        result_states = [array([1, 0]), array([0, 1])]
-        result_digits = [int(x) for x in bin(result)[2:]]
-        while len(result_digits) < len(keys):
-            result_digits.insert(0, 0)
-
-        for res, key in zip(result_digits, keys):
-            # set to state measured
-            new_state_obj = KetState(result_states[res], [key])
-            self.states[key] = new_state_obj
-
-        if len(all_keys) > 0:
-            new_state_obj = KetState(new_state, all_keys)
-            for key in all_keys:
-                self.states[key] = new_state_obj
-
-        return dict(zip(keys, result_digits))
+        return dict(zip(keys, bits))
