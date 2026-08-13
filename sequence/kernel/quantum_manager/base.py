@@ -1,8 +1,8 @@
 """Base classes for quantum state managers.
 
 This module defines the root QuantumManager API used to create, store, retrieve, and update quantum states by manager
-key. It also defines QuantumManagerDenseQubit, an intermediate base class for ket-vector and density-matrix managers
-that share dense qubit circuit-preparation helpers.
+key. It also provides module-level circuit helpers (`validate_circuit_run`, `swap_qubits`) shared by the dense qubit
+managers (ket vector, density matrix); they live outside the class so the non-dense managers don't inherit them.
 
 Supported manager formalisms include:
     - Ket vector
@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 from qutip_qip.circuit import QubitCircuit
 from qutip_qip.operations import gate_sequence_product, Gate
 
-from ..quantum_utils import identity, kron
 from ...constants import KET_VECTOR_FORMALISM
 
 if TYPE_CHECKING:
@@ -152,101 +151,41 @@ class QuantumManager(ABC):
         self.states = states
 
 
-class QuantumManagerDenseQubit(QuantumManager):
-    """Shared circuit helpers for dense qubit managers.
+# --- Dense qubit circuit helpers ---------------------------------------------
+# Module-level helpers shared by the ket-vector and density-matrix managers only.
+# They live outside QuantumManager so the non-dense managers (Bell diagonal, Fock,
+# stabilizer) that also subclass it don't inherit them.
 
-    "Dense" means the full state is stored directly as a numerical vector or matrix. 
-    "Qubit" means each subsystem is a two-level quantum system. 
+def validate_circuit_run(circuit: Circuit, keys: list[int], meas_samp=None) -> None:
+    """Validate common dense-qubit circuit inputs.
 
-    This class is the parent for ket-vector and density-matrix managers:
-    - Ket vector: qubit + dense vector.
-    - Density matrix: qubit + dense matrix.
-
-    Other managers are excluded for different reasons:
-    - Stabilizer: qubit + tableau, not dense vector/matrix.
-    - Bell diagonal: qubit-pair state with compact Bell-basis probabilities, not dense vector/matrix.
-    - Fock density: dense matrix, but not restricted to qubit subsystems.
+    Args:
+        circuit (Circuit): quantum circuit to apply.
+        keys (list[int]): list of keys for quantum states to apply circuit to.
+        meas_samp (float): random sample used for measurement.
     """
+    if len(keys) != circuit.size:
+        raise ValueError("mismatch between circuit size and supplied qubits")
+    if circuit.measured_qubits and meas_samp is None:
+        raise ValueError("must specify random sample when measuring qubits")
 
-    @abstractmethod
-    def run_circuit(self, circuit: Circuit, keys: list[int], meas_samp=None):
-        """Run a circuit on dense qubit states.
 
-        Args:
-            circuit (Circuit): quantum circuit to apply.
-            keys (list[int]): list of keys for quantum states to apply circuit to.
-            meas_samp (float): random sample used for measurement.
+def swap_qubits(all_keys: list[int], keys: list[int]) -> tuple[list[int], NDArray]:
+    """Swap qubits in the circuit.
 
-        Returns:
-            dict[int, int]: dictionary mapping qstate keys to measurement results.
-        """
-        pass
+    Args:
+        all_keys (list[int]): The list of all qubit keys.
+        keys (list[int]): The list of qubit keys to swap.
 
-    @staticmethod
-    def _validate_circuit_run(circuit: Circuit, keys: list[int], meas_samp=None) -> None:
-        """Validate common dense-qubit circuit inputs."""
-        if len(keys) != circuit.size:
-            raise ValueError("mismatch between circuit size and supplied qubits")
-        if circuit.measured_qubits and meas_samp is None:
-            raise ValueError("must specify random sample when measuring qubits")
-
-    def _prepare_circuit(self, circuit: Circuit, keys: list[int]) -> tuple[NDArray, list[int], NDArray]:
-        """Prepare state and circuit matrices for dense-qubit execution.
-        
-        Args:
-            circuit (Circuit): quantum circuit to apply.
-            keys (list[int]): list of keys for quantum states to apply circuit to.
-        
-        Returns:
-            tuple: tuple containing the new state, all keys, and the circuit matrix.
-                   Note: the returned circuit matrix contains any necessary swaps to align qubits of new state
-        """
-        old_states = []
-        all_keys = []
-
-        # go through keys and get all unique qstate objects
-        for key in keys:
-            qstate = self.states[key]
-            if qstate.keys[0] not in all_keys:
-                old_states.append(qstate.state)
-                all_keys += qstate.keys
-
-        # construct compound state; order qubits
-        new_state = [1]
-        for state in old_states:
-            new_state = kron(new_state, state)
-
-        # get circuit matrix; expand if necessary
-        circ_mat = circuit.get_unitary_matrix()
-        if circuit.size < len(all_keys):
-            # pad size of circuit matrix if necessary
-            diff = len(all_keys) - circuit.size
-            circ_mat = kron(circ_mat, identity(2 ** diff))
-
-        # apply any necessary swaps
-        if not all([all_keys.index(key) == i for i, key in enumerate(keys)]):
-            all_keys, swap_mat = self._swap_qubits(all_keys, keys)
-            circ_mat = circ_mat @ swap_mat
-
-        return new_state, all_keys, circ_mat
-
-    @staticmethod
-    def _swap_qubits(all_keys: list[int], keys: list[int]) -> tuple[list[int], NDArray]:
-        """Swap qubits in the circuit.
-        
-        Args:
-            all_keys (list[int]): The list of all qubit keys.
-            keys (list[int]): The list of qubit keys to swap.
-        
-        Returns:
-            tuple: updated list of all keys and the swap matrix.
-        """
-        swap_circuit = QubitCircuit(N=len(all_keys))
-        for i, key in enumerate(keys):
-            j = all_keys.index(key)
-            if j != i:
-                gate = Gate("SWAP", targets=[i, j])
-                swap_circuit.add_gate(gate)
-                all_keys[i], all_keys[j] = all_keys[j], all_keys[i]
-        swap_mat = gate_sequence_product(swap_circuit.propagators()).full()
-        return all_keys, swap_mat
+    Returns:
+        tuple: updated list of all keys and the swap matrix.
+    """
+    swap_circuit = QubitCircuit(N=len(all_keys))
+    for i, key in enumerate(keys):
+        j = all_keys.index(key)
+        if j != i:
+            gate = Gate("SWAP", targets=[i, j])
+            swap_circuit.add_gate(gate)
+            all_keys[i], all_keys[j] = all_keys[j], all_keys[i]
+    swap_mat = gate_sequence_product(swap_circuit.propagators()).full()
+    return all_keys, swap_mat
