@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from .base import QuantumManager, swap_qubits, validate_circuit_run
 from ..quantum_state import DensityState, OneDimensionInput, TwoDimensionInput
-from ..quantum_utils import identity, kron, measure_entangled_state_with_cache_density, measure_multiple_with_cache_density, measure_state_with_cache_density
+from ..quantum_utils import (identity, kron, measure_entangled_state_with_cache_density, 
+                             measure_multiple_with_cache_density, measure_state_with_cache_density)
 from ...constants import DENSITY_MATRIX_FORMALISM
 
 import itertools
@@ -93,7 +94,7 @@ class QuantumManagerDensity(QuantumManager):
                 or self.two_qubit_gate_fid < 1.0
                 or self.measurement_fid < 1.0)
 
-    def new( self, state: OneDimensionInput | TwoDimensionInput = ((complex(1), complex(0)), (complex(0), complex(0)))) -> int:
+    def new(self, state: OneDimensionInput | TwoDimensionInput = ((complex(1), complex(0)), (complex(0), complex(0)))) -> int:
         """Method to create a new density matrix state.
         
         Args:

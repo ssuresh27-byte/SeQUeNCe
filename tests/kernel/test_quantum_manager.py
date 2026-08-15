@@ -73,32 +73,35 @@ def test_qmanager_circuit():
 
     # single state
     key = qm.new()
-    circuit = DumbCircuit(1, np.array([[0, 1], [1, 0]]))
+    circuit = Circuit(1)
+    circuit.x(0)
     qm.run_circuit(circuit, [key])
     assert np.all(qm.get(key).state == np.array([0, 1]))
 
     # two states
     key1 = qm.new()
     key2 = qm.new()
-    circuit = DumbCircuit(2, np.identity(4))
+    circuit = Circuit(2)
     qm.run_circuit(circuit, [key1, key2])
     assert np.all(qm.get(key1).state == qm.get(key2).state)
     assert np.all(qm.get(key1).state == np.array([1, 0, 0, 0]))
 
     # two states, wrong order
+    stored_keys = list(qm.get(key1).keys)
     qm.run_circuit(circuit, [key2, key1])
     assert np.all(qm.get(key1).state == qm.get(key2).state)
     assert np.all(qm.get(key1).state == np.array([1, 0, 0, 0]))
-    assert qm.get(key1).keys == [key2, key1]
+    assert qm.get(key1).keys == stored_keys
     # get the state with ascending order of keys
     assert qm.get_ascending_keys(key1).keys == sorted([key2, key1])
 
     # single state in multi-qubit system
     key1 = qm.new()
     key2 = qm.new()
-    circuit1 = DumbCircuit(2, np.identity(4))
+    circuit1 = Circuit(2)
     qm.run_circuit(circuit1, [key1, key2])
-    circuit2 = DumbCircuit(1, np.array([[0, 1], [1, 0]]))
+    circuit2 = Circuit(1)
+    circuit2.x(0)
     qm.run_circuit(circuit2, [key1])
     assert np.all(qm.get(key1).state == np.array([0, 0, 1, 0]))
     assert (qm.get(key1) is qm.get(key2))
@@ -161,11 +164,27 @@ def test_qmanager_circuit_dedups_states_by_identity_not_first_key():
     assert qm.get(12) is merged
 
 
-def _reference_prepare_circuit(qm, circuit, keys):
-    """Build the full circuit unitary (via qutip) and compound state for `keys`.
+def _reference_run_circuit(qm: QuantumManagerKet, circuit: Circuit, keys: list[int], meas_samp: float = None):
+    """Stock matrix-path circuit execution -- the pre-optimization reference for the
+    fast run_circuit. Builds the full circuit unitary (via _reference_prepare_circuit /
+    qutip) and applies it, measuring through _reference_measure. Kept in the test so the
+    production manager doesn't have to carry this second code path.
+    """
+    validate_circuit_run(circuit, keys, meas_samp)
+    new_state, all_keys, circ_mat = _reference_prepare_circuit(qm, circuit, keys)
+    new_state = circ_mat @ new_state
+    if len(circuit.measured_qubits) == 0:
+        new_ket = KetState(new_state, all_keys)
+        for key in all_keys:
+            qm.states[key] = new_ket
+        return {}
+    meas_keys = [all_keys[i] for i in circuit.measured_qubits]
+    return _reference_measure(qm, new_state, meas_keys, all_keys, meas_samp)
 
-    Ket-vector twin of QuantumManagerDensity._prepare_circuit; kept here in the test
-    because the fast production ket manager no longer builds full unitaries.
+
+def _reference_prepare_circuit(qm: QuantumManagerKet, circuit: Circuit, keys: list[int]):
+    """The old QuantumManagerDensity._prepare_circuit(), no longer used in production.
+    Build the full circuit unitary (via qutip) and compound state for `keys`.
     """
     old_states = []
     all_keys = []
@@ -191,28 +210,9 @@ def _reference_prepare_circuit(qm, circuit, keys):
     return new_state, all_keys, circ_mat
 
 
-def _reference_run_circuit(qm, circuit, keys, meas_samp=None):
-    """Stock matrix-path circuit execution -- the pre-optimization reference for the
-    fast run_circuit. Builds the full circuit unitary (via _reference_prepare_circuit /
-    qutip) and applies it, measuring through _reference_measure. Kept in the test so the
-    production manager doesn't have to carry this second code path.
-    """
-    validate_circuit_run(circuit, keys, meas_samp)
-    new_state, all_keys, circ_mat = _reference_prepare_circuit(qm, circuit, keys)
-    new_state = circ_mat @ new_state
-    if len(circuit.measured_qubits) == 0:
-        new_ket = KetState(new_state, all_keys)
-        for key in all_keys:
-            qm.states[key] = new_ket
-        return {}
-    meas_keys = [all_keys[i] for i in circuit.measured_qubits]
-    return _reference_measure(qm, new_state, meas_keys, all_keys, meas_samp)
-
-
-def _reference_measure(qm, state, keys, all_keys, meas_samp):
-    """Stock projector-based measurement -- the reference for the fast _measure
-    (formerly QuantumManagerKet._old_measure). Handles single- and multi-qubit
-    measurement by building the projected states via the cached utilities.
+def _reference_measure(qm: QuantumManagerKet, state: np.ndarray, keys: list[int], all_keys: list[int], meas_samp: float):
+    """The old QuantumManagerKet._measure(), no longer used in production.
+       Handles single- and multi-qubit measurement by building the projected states via the cached utilities.
     """
     if len(keys) == 1:
         if len(all_keys) == 1:
@@ -220,8 +220,7 @@ def _reference_measure(qm, state, keys, all_keys, meas_samp):
             result = 0 if meas_samp < prob_0 else 1
         else:
             state_index = all_keys.index(keys[0])
-            state_0, state_1, prob_0 = measure_entangled_state_with_cache_ket(
-                tuple(state), state_index, len(all_keys))
+            state_0, state_1, prob_0 = measure_entangled_state_with_cache_ket(tuple(state), state_index, len(all_keys))
             new_state = np.array(state_0 if meas_samp < prob_0 else state_1, dtype=complex)
             result = 0 if meas_samp < prob_0 else 1
         all_keys.remove(keys[0])
@@ -267,9 +266,8 @@ _EQUIV_CIRCUITS = [
     (3, lambda c: (c.h(0), c.cx(0, 1), c.ccx(0, 1, 2))),
 ]
 
-
 @pytest.mark.parametrize("size, build", _EQUIV_CIRCUITS)
-def test_fast_run_circuit_matches_reference(size, build):
+def test_fast_run_circuit_matches_reference(size: int, build: callable):
     """The fast contraction path produces the same state as the stock matrix path."""
     keys = list(range(size))
 
@@ -287,8 +285,7 @@ def test_fast_run_circuit_matches_reference(size, build):
     build(circuit_ref)
     _reference_run_circuit(qm_ref, circuit_ref, keys)
 
-    # Normalize qubit ordering (paths may store keys in different orders), then
-    # compare amplitudes directly.
+    # Normalize qubit ordering (paths may store keys in different orders), then compare amplitudes directly.
     state_fast = qm_fast.get_ascending_keys(keys[0]).state
     state_ref = qm_ref.get_ascending_keys(keys[0]).state
     assert np.allclose(state_fast, state_ref)
@@ -311,15 +308,16 @@ def test_fast_measure_matches_reference(samp):
     qm_fast = make_bell()
     qm_ref = make_bell()
 
-    res_fast = qm_fast._measure(
-        np.array(qm_fast.get(key).state, dtype=complex), [key], list(qm_fast.get(key).keys), samp)
-    res_ref = _reference_measure(
-        qm_ref, np.array(qm_ref.get(key).state, dtype=complex), [key], list(qm_ref.get(key).keys), samp)
+    res_fast = qm_fast._measure(np.array(qm_fast.get(key).state, dtype=complex), 
+                                [key], list(qm_fast.get(key).keys), samp)
+    res_ref = _reference_measure(qm_ref, np.array(qm_ref.get(key).state, dtype=complex), 
+                                 [key], list(qm_ref.get(key).keys), samp)
 
-    assert res_fast == res_ref                                          # same outcome
-    assert np.allclose(qm_fast.get(key).state, qm_ref.get(key).state)   # measured qubit collapsed the same
+    assert res_fast == res_ref                                             # same outcome
+    assert np.allclose(qm_fast.get(key).state, qm_ref.get(key).state)      # measured qubit collapsed the same
     assert np.allclose(qm_fast.get(other).state, qm_ref.get(other).state)  # partner qubit collapsed the same
 
+test_fast_measure_matches_reference(0.05)
 
 @pytest.mark.parametrize("samp", [0.2, 0.8])
 def test_fast_measure_matches_reference_single_qubit(samp):
