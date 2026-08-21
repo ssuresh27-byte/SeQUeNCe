@@ -318,7 +318,6 @@ def test_fast_measure_matches_reference(samp):
     assert np.allclose(qm_fast.get(key).state, qm_ref.get(key).state)      # measured qubit collapsed the same
     assert np.allclose(qm_fast.get(other).state, qm_ref.get(other).state)  # partner qubit collapsed the same
 
-test_fast_measure_matches_reference(0.05)
 
 @pytest.mark.parametrize("samp", [0.2, 0.8])
 def test_fast_measure_matches_reference_single_qubit(samp):
