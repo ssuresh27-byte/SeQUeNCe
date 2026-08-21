@@ -165,9 +165,9 @@ def validate_circuit_run(circuit: Circuit, keys: list[int], meas_samp=None) -> N
         meas_samp (float): random sample used for measurement.
     """
     if len(keys) != circuit.size:
-        raise ValueError("mismatch between circuit size and supplied qubits")
+        raise ValueError("Mismatch between circuit size and supplied qubits.")
     if circuit.measured_qubits and meas_samp is None:
-        raise ValueError("must specify random sample when measuring qubits")
+        raise ValueError("Must specify random sample when measuring qubits.")
 
 
 def swap_qubits(all_keys: list[int], keys: list[int]) -> tuple[list[int], NDArray]:

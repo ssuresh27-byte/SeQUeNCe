@@ -5,13 +5,12 @@ from __future__ import annotations
 
 from .base import QuantumManager, swap_qubits, validate_circuit_run
 from ..quantum_state import DensityState, OneDimensionInput, TwoDimensionInput
-from ..quantum_utils import (identity, kron, measure_entangled_state_with_cache_density, 
-                             measure_multiple_with_cache_density, measure_state_with_cache_density)
+from ..quantum_utils import (measure_entangled_state_with_cache_density, measure_multiple_with_cache_density, 
+                             measure_state_with_cache_density)
 from ...constants import DENSITY_MATRIX_FORMALISM
 
 import itertools
 import numpy as np
-from numpy import array
 from typing import TYPE_CHECKING
 from ...components.circuit import Circuit
 
@@ -56,8 +55,7 @@ class QuantumManagerDensity(QuantumManager):
         self.noise_rng = np.random.default_rng(seed)
         self.noise_type: str = kwargs.get("noise_type", "depolarize")
         if self.noise_type not in self._NOISE_ALPHABET:
-            raise ValueError(f"Unknown noise_type '{self.noise_type}'. "
-                             f"Use one of {sorted(self._NOISE_ALPHABET)}.")
+            raise ValueError(f"Unknown noise_type '{self.noise_type}'. Use one of {sorted(self._NOISE_ALPHABET)}.")
         self.one_qubit_gate_fid: float = self._validate(kwargs.get("one_qubit_gate_fid", 1.0))
         self.two_qubit_gate_fid: float = self._validate(kwargs.get("two_qubit_gate_fid", 1.0))
         self.measurement_fid: float = self._validate(kwargs.get("measurement_fid", 1.0))
@@ -90,11 +88,9 @@ class QuantumManagerDensity(QuantumManager):
         Returns:
             bool: True if any gate or measurement fidelity is < 1, else False.
         """
-        return (self.one_qubit_gate_fid < 1.0
-                or self.two_qubit_gate_fid < 1.0
-                or self.measurement_fid < 1.0)
+        return self.one_qubit_gate_fid < 1.0 or self.two_qubit_gate_fid < 1.0 or self.measurement_fid < 1.0
 
-    def new(self, state: OneDimensionInput | TwoDimensionInput = ((complex(1), complex(0)), (complex(0), complex(0)))) -> int:
+    def new(self, state: OneDimensionInput | TwoDimensionInput = ((1 + 0j, 0j), (0j, 0j))) -> int:
         """Method to create a new density matrix state.
         
         Args:
@@ -166,14 +162,14 @@ class QuantumManagerDensity(QuantumManager):
         # construct compound state; order qubits
         new_state = [1]
         for state in old_states:
-            new_state = kron(new_state, state)
+            new_state = np.kron(new_state, state)
 
         # get circuit matrix; expand if necessary
         circ_mat = circuit.get_unitary_matrix()
         if circuit.size < len(all_keys):
             # pad size of circuit matrix if necessary
             diff = len(all_keys) - circuit.size
-            circ_mat = kron(circ_mat, identity(2 ** diff))
+            circ_mat = np.kron(circ_mat, np.identity(2 ** diff))
 
         # apply any necessary swaps
         if not all([all_keys.index(key) == i for i, key in enumerate(keys)]):
@@ -182,10 +178,8 @@ class QuantumManagerDensity(QuantumManager):
 
         return new_state, all_keys, circ_mat
 
-    # ------------------------------------------------------------------ #
-    # Per-gate noise model (deterministic CPTP channels on the density    #
-    # matrix). Enabled by passing gate fidelities < 1 to the constructor. #
-    # ------------------------------------------------------------------ #
+    # Per-gate noise model (deterministic CPTP channels on the density 
+    # matrix). Enabled by passing gate fidelities < 1 to the constructor.
     def _run_circuit_noisy(self, circuit: Circuit, keys: list[int], meas_samp) -> dict[int, int]:
         """Run a circuit gate-by-gate, applying a noise channel after each gate.
 
@@ -563,12 +557,13 @@ class QuantumManagerDensity(QuantumManager):
                 key = keys[0]
                 num_states = len(all_keys)
                 state_index = all_keys.index(key)
-                state_0, state_1, prob_0 = measure_entangled_state_with_cache_density(tuple(map(tuple, state)), state_index, num_states)
+                state_0, state_1, prob_0 = measure_entangled_state_with_cache_density(tuple(map(tuple, state)), 
+                                                                                      state_index, num_states)
                 if meas_samp < prob_0:
-                    new_state = array(state_0, dtype=complex)
+                    new_state = np.array(state_0, dtype=complex)
                     result = 0
                 else:
-                    new_state = array(state_1, dtype=complex)
+                    new_state = np.array(state_1, dtype=complex)
                     result = 1
 
         else:
