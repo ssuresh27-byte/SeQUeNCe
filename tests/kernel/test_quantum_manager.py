@@ -7,10 +7,11 @@ import pytest
 import stim
 
 from sequence.kernel.quantum_state import StabilizerState, KetState
-from sequence.kernel.quantum_manager import QuantumManagerDensity, QuantumManagerDensityFock, QuantumManagerKet, QuantumManagerStabilizer
+from sequence.kernel.quantum_manager import (QuantumManagerDensity, QuantumManagerDensityFock, 
+                                             QuantumManagerKet, QuantumManagerStabilizer)
 from sequence.kernel.quantum_manager.base import swap_qubits, validate_circuit_run
-from sequence.kernel.quantum_utils import (identity, kron, measure_state_with_cache_ket,
-                                           measure_entangled_state_with_cache_ket, measure_multiple_with_cache_ket)
+from sequence.kernel.quantum_utils import (measure_state_with_cache_ket,measure_entangled_state_with_cache_ket, 
+                                           measure_multiple_with_cache_ket)
 from sequence.components.circuit import Circuit
 from sequence.constants import SECOND
 
@@ -196,12 +197,12 @@ def _reference_prepare_circuit(qm: QuantumManagerKet, circuit: Circuit, keys: li
 
     new_state = [1]
     for state in old_states:
-        new_state = kron(new_state, state)
+        new_state = np.kron(new_state, state)
 
     circ_mat = circuit.get_unitary_matrix()
     if circuit.size < len(all_keys):
         diff = len(all_keys) - circuit.size
-        circ_mat = kron(circ_mat, identity(2 ** diff))
+        circ_mat = np.kron(circ_mat, np.identity(2 ** diff))
 
     if not all([all_keys.index(key) == i for i, key in enumerate(keys)]):
         all_keys, swap_mat = swap_qubits(all_keys, keys)
