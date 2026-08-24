@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from .base import QuantumManager
 from .utils import swap_qubits, validate_circuit_run
+from ..quantum_gates import PAULI_GATES
 from ..quantum_state import DensityState, OneDimensionInput, TwoDimensionInput
 from ..quantum_utils import (measure_entangled_state_with_cache_density, measure_multiple_with_cache_density, 
                              measure_state_with_cache_density)
@@ -18,12 +19,6 @@ from ...components.circuit import Circuit
 @QuantumManager.register(DENSITY_MATRIX_FORMALISM)
 class QuantumManagerDensity(QuantumManager):
     """Class to track and manage states with the density matrix formalism."""
-
-    # Single-qubit Pauli matrices used to build noise-channel Kraus operators.
-    _PAULI = {"I": np.eye(2, dtype=complex),
-              "X": np.array([[0, 1], [1, 0]], dtype=complex),
-              "Y": np.array([[0, -1j], [1j, 0]], dtype=complex),
-              "Z": np.array([[1, 0], [0, -1]], dtype=complex)}
 
     # Which non-identity Pauli alphabet each noise_type samples over.
     _NOISE_ALPHABET = {"depolarize": "IXYZ", "dephase": "IZ", "bit_flip": "IX"}
@@ -288,9 +283,9 @@ class QuantumManagerDensity(QuantumManager):
         Returns:
             np.ndarray: the 2^n x 2^n Pauli operator.
         """
-        ops = [self._PAULI["I"]] * n
+        ops = [PAULI_GATES["I"]] * n
         for pauli_char, q in zip(label, positions):
-            ops[q] = self._PAULI[pauli_char]
+            ops[q] = PAULI_GATES[pauli_char]
         full = ops[0]
         for op in ops[1:]:
             full = np.kron(full, op)

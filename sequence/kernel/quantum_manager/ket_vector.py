@@ -7,67 +7,17 @@ O(4^k) operators and swap matrices.
 """
 from __future__ import annotations
 
-import math
 import numpy as np
 
-from .base import QuantumManager, swap_qubits, validate_circuit_run
+from .base import QuantumManager
+from .utils import swap_qubits, validate_circuit_run
 from ..quantum_state import KetState, OneDimensionInput
-from ...constants import KET_VECTOR_FORMALISM, SQRT_HALF
+from ..quantum_gates import SUPPORTED_GATES, gate_matrix
+from ...constants import KET_VECTOR_FORMALISM
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ...components.circuit import Circuit
-
-
-# Fixed gate matrices, matching the kron ordering SeQUeNCe uses to build compound states.
-_H = np.array([[SQRT_HALF, SQRT_HALF], [SQRT_HALF, -SQRT_HALF]], dtype=complex)
-_X = np.array([[0, 1], [1, 0]], dtype=complex)
-_Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
-_Z = np.array([[1, 0], [0, -1]], dtype=complex)
-_S = np.array([[1, 0], [0, 1j]], dtype=complex)
-_SDG = np.array([[1, 0], [0, -1j]], dtype=complex)
-_T = np.array([[1, 0], [0, np.exp(1j * math.pi / 4)]], dtype=complex)
-_CX = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]], dtype=complex)
-_CZ = np.diag([1, 1, 1, -1]).astype(complex)
-_SWAP = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=complex)
-_CCX = np.eye(8, dtype=complex)
-_CCX[[6, 7]] = _CCX[[7, 6]]   # flip target when both controls = 1
-_ROOT_IZ = SQRT_HALF * np.array([[1 + 1j, 0], [0, 1 - 1j]], dtype=complex)
-_MINUS_ROOT_IZ = SQRT_HALF * np.array([[1 - 1j, 0], [0, 1 + 1j]], dtype=complex)
-_ROOT_IY = SQRT_HALF * np.array([[1, 1], [-1, 1]], dtype=complex)
-_MINUS_ROOT_IY = SQRT_HALF * np.array([[1, -1], [1, 1]], dtype=complex)
-
-# name -> (matrix, num_qubits). Names match the gate names Circuit emits (see components/circuit.py).
-_FIXED = {
-    "h": (_H, 1), "x": (_X, 1), "y": (_Y, 1), "z": (_Z, 1), "s": (_S, 1), "sdg": (_SDG, 1), 
-    "t": (_T, 1), "cx": (_CX, 2), "cz": (_CZ, 2), "swap": (_SWAP, 2), "ccx": (_CCX, 3),
-    "root_iZ": (_ROOT_IZ, 1), "minus_root_iZ": (_MINUS_ROOT_IZ, 1),
-    "root_iY": (_ROOT_IY, 1), "minus_root_iY": (_MINUS_ROOT_IY, 1),
-}
-
-
-def _phase(theta: float) -> np.ndarray:
-    return np.array([[1, 0], [0, np.exp(1j * theta)]], dtype=complex)
-
-
-def _gate_matrix(name: str, arg) -> np.ndarray:
-    """Return the matrix for a gate by name and argument.
-    
-    Args:
-        name (str): The name of the gate.
-        arg: The argument for the gate (if any).
-
-    Returns:
-        np.ndarray: The matrix representing the gate.
-    """
-    if name in _FIXED:
-        return _FIXED[name][0]
-    if name == "phase":
-        return _phase(arg)
-    raise KeyError(name)
-
-
-_SUPPORTED = set(_FIXED) | {"phase"}
 
 
 def _apply(tensor: np.ndarray, axes: list[int], gate: np.ndarray) -> np.ndarray:
@@ -132,7 +82,7 @@ class QuantumManagerKet(QuantumManager):
             dict[int, int]: mapping of each measured key to its outcome, or an
                             empty dict when the circuit performs no measurement.
         """
-        unsupported = [g[0] for g in circuit.gates if g[0] not in _SUPPORTED]
+        unsupported = [g[0] for g in circuit.gates if g[0] not in SUPPORTED_GATES]
         if unsupported:
             raise NotImplementedError(f"QuantumManagerKet.run_circuit received unsupported gate(s): {unsupported}")
         validate_circuit_run(circuit, keys, meas_samp)
@@ -156,7 +106,7 @@ class QuantumManagerKet(QuantumManager):
         for name, indices, arg in circuit.gates:
             # Map circuit key positions to tensor axes in gate-qubit order.
             axes = [key_to_axis[keys[i]] for i in indices]
-            tensor = _apply(tensor, axes, _gate_matrix(name, arg))
+            tensor = _apply(tensor, axes, gate_matrix(name, arg))
         new_state = tensor.reshape(-1)             # back to a flat 2^k vector
 
         if len(circuit.measured_qubits) == 0:
