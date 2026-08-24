@@ -3,7 +3,8 @@ This module implements the quantum manager for density matrix states.
 """
 from __future__ import annotations
 
-from .base import QuantumManager, swap_qubits, validate_circuit_run
+from .base import QuantumManager
+from .utils import swap_qubits, validate_circuit_run
 from ..quantum_state import DensityState, OneDimensionInput, TwoDimensionInput
 from ..quantum_utils import (measure_entangled_state_with_cache_density, measure_multiple_with_cache_density, 
                              measure_state_with_cache_density)
@@ -11,7 +12,6 @@ from ...constants import DENSITY_MATRIX_FORMALISM
 
 import itertools
 import numpy as np
-from typing import TYPE_CHECKING
 from ...components.circuit import Circuit
 
 

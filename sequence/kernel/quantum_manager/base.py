@@ -1,8 +1,6 @@
 """Base classes for quantum state managers.
 
-This module defines the root QuantumManager API used to create, store, retrieve, and update quantum states by manager
-key. It also provides module-level circuit helpers (`validate_circuit_run`, `swap_qubits`) shared by the dense qubit
-managers (ket vector, density matrix); they live outside the class so the non-dense managers don't inherit them.
+This module defines the root QuantumManager API used to create, store, retrieve, and update quantum states.
 
 Supported manager formalisms include:
     - Ket vector
@@ -15,16 +13,12 @@ Supported manager formalisms include:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from numpy.typing import NDArray
 from threading import Lock
 from typing import TYPE_CHECKING, Any
-from qutip_qip.circuit import QubitCircuit
-from qutip_qip.operations import gate_sequence_product, Gate
 
 from ...constants import KET_VECTOR_FORMALISM
 
 if TYPE_CHECKING:
-    from ...components.circuit import Circuit
     from ..quantum_state import State
 
 
@@ -149,43 +143,3 @@ class QuantumManager(ABC):
             states (dict): A dictionary mapping keys to their corresponding quantum states.
         """
         self.states = states
-
-
-# --- Dense qubit circuit helpers ---------------------------------------------
-# Module-level helpers shared by the ket-vector and density-matrix managers only.
-# They live outside QuantumManager so the non-dense managers (Bell diagonal, Fock,
-# stabilizer) that also subclass it don't inherit them.
-
-def validate_circuit_run(circuit: Circuit, keys: list[int], meas_samp=None) -> None:
-    """Validate common dense-qubit circuit inputs.
-
-    Args:
-        circuit (Circuit): quantum circuit to apply.
-        keys (list[int]): list of keys for quantum states to apply circuit to.
-        meas_samp (float): random sample used for measurement.
-    """
-    if len(keys) != circuit.size:
-        raise ValueError("Mismatch between circuit size and supplied qubits.")
-    if circuit.measured_qubits and meas_samp is None:
-        raise ValueError("Must specify random sample when measuring qubits.")
-
-
-def swap_qubits(all_keys: list[int], keys: list[int]) -> tuple[list[int], NDArray]:
-    """Swap qubits in the circuit.
-
-    Args:
-        all_keys (list[int]): The list of all qubit keys.
-        keys (list[int]): The list of qubit keys to swap.
-
-    Returns:
-        tuple: updated list of all keys and the swap matrix.
-    """
-    swap_circuit = QubitCircuit(N=len(all_keys))
-    for i, key in enumerate(keys):
-        j = all_keys.index(key)
-        if j != i:
-            gate = Gate("SWAP", targets=[i, j])
-            swap_circuit.add_gate(gate)
-            all_keys[i], all_keys[j] = all_keys[j], all_keys[i]
-    swap_mat = gate_sequence_product(swap_circuit.propagators()).full()
-    return all_keys, swap_mat

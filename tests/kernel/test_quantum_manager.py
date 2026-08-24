@@ -9,8 +9,8 @@ import stim
 from sequence.kernel.quantum_state import StabilizerState, KetState
 from sequence.kernel.quantum_manager import (QuantumManagerDensity, QuantumManagerDensityFock, 
                                              QuantumManagerKet, QuantumManagerStabilizer)
-from sequence.kernel.quantum_manager.base import swap_qubits, validate_circuit_run
-from sequence.kernel.quantum_utils import (measure_state_with_cache_ket,measure_entangled_state_with_cache_ket, 
+from sequence.kernel.quantum_manager.utils import swap_qubits, validate_circuit_run
+from sequence.kernel.quantum_utils import (measure_state_with_cache_ket, measure_entangled_state_with_cache_ket, 
                                            measure_multiple_with_cache_ket)
 from sequence.components.circuit import Circuit
 from sequence.constants import SECOND
