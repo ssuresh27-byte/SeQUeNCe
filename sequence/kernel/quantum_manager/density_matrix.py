@@ -54,6 +54,7 @@ class QuantumManagerDensity(QuantumManager):
         self.one_qubit_gate_fid: float = self._validate(kwargs.get("one_qubit_gate_fid", 1.0))
         self.two_qubit_gate_fid: float = self._validate(kwargs.get("two_qubit_gate_fid", 1.0))
         self.measurement_fid: float = self._validate(kwargs.get("measurement_fid", 1.0))
+        self.noise_enabled: bool = self.one_qubit_gate_fid < 1.0 or self.two_qubit_gate_fid < 1.0 or self.measurement_fid < 1.0
         # accounting
         self.gate_1q_count = 0
         self.gate_2q_count = 0
@@ -76,14 +77,6 @@ class QuantumManagerDensity(QuantumManager):
         if not 0.0 <= value <= 1.0:
             raise ValueError("Fidelity must be between 0 and 1, inclusive.")
         return value
-
-    def _noise_enabled(self) -> bool:
-        """True if any configured fidelity is below 1 (i.e. noise should be applied).
-
-        Returns:
-            bool: True if any gate or measurement fidelity is < 1, else False.
-        """
-        return self.one_qubit_gate_fid < 1.0 or self.two_qubit_gate_fid < 1.0 or self.measurement_fid < 1.0
 
     def new(self, state: OneDimensionInput | TwoDimensionInput = ((1 + 0j, 0j), (0j, 0j))) -> int:
         """Method to create a new density matrix state.
@@ -115,7 +108,7 @@ class QuantumManagerDensity(QuantumManager):
 
         # Noisy path: apply gates one at a time, inserting a noise channel after each
         # (see _run_circuit_noisy). Only taken when a fidelity < 1 is configured.
-        if self._noise_enabled():
+        if self.noise_enabled:
             return self._run_circuit_noisy(circuit, keys, meas_samp)
 
         new_state, all_keys, circ_mat = self._prepare_circuit(circuit, keys)
