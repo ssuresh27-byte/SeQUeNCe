@@ -102,6 +102,7 @@ class QuantumManagerDensity(QuantumManager):
             circ_mat = circ_mat @ swap_mat
 
         return new_state, all_keys, circ_mat
+
     def set(self, keys: list[int], state: OneDimensionInput | TwoDimensionInput) -> None:
         """Method to set the quantum state at the given keys.
 
