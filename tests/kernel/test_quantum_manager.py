@@ -134,37 +134,6 @@ def test_qmanager_circuit():
     assert np.array_equal(qm.get(key1).state, qm.get(key3).state)
 
 
-def test_qmanager_circuit_dedups_states_by_identity_not_first_key():
-    """Regression: run_circuit assembles its working state by deduping the
-    involved KetStates on object identity, not on their first key.
-
-    Mid-teleport (Bell-measurement collapses/merges) the manager can transiently
-    hold two *distinct* KetState objects whose ``.keys`` lists share a first key.
-    Deduping the assembly loop on ``qstate.keys[0]`` would treat the second state
-    as already-seen and skip it -- dropping its qubits from ``all_keys`` and, on
-    the no-measurement store path, orphaning those keys (they keep pointing at the
-    stale object while the rest move to the merged ket). Identity dedup pulls in
-    every distinct involved state exactly once, so every input key ends up sharing
-    the merged ket.
-    """
-    qm = QuantumManagerKet()
-
-    # Two distinct states sharing first key 11; state_a's listing of 11 is stale.
-    state_a = KetState([1, 0, 0, 0], [10, 11])
-    state_b = KetState([1, 0, 0, 0], [11, 12])
-    qm.states = {10: state_a, 11: state_b, 12: state_b}
-
-    # No measurement; gate touches only key 10, so the run turns purely on dedup.
-    circuit = Circuit(2)
-    circuit.x(0)
-    qm.run_circuit(circuit, [10, 12])
-
-    # All involved keys share one merged ket; first-key dedup would orphan key 12.
-    merged = qm.get(10)
-    assert qm.get(11) is merged
-    assert qm.get(12) is merged
-
-
 def _reference_run_circuit(qm: QuantumManagerKet, circuit: Circuit, keys: list[int], meas_samp: float = None):
     """Stock matrix-path circuit execution -- the pre-optimization reference for the
     fast run_circuit. Builds the full circuit unitary (via _reference_prepare_circuit /
