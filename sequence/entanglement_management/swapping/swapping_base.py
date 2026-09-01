@@ -197,6 +197,10 @@ class EntanglementSwappingA(EntanglementProtocol, ABC):
     def set_others(self, protocol: str, node: str, memories: list[str]) -> None:
         """Method to set other entanglement protocol instance.
 
+        Note:
+            ``memories`` is intentionally unused; swapping uses the memos it
+            already holds. Kept for interface compatibility.
+
         Args:
             protocol (str): other protocol name.
             node (str): other node name.
@@ -355,6 +359,10 @@ class EntanglementSwappingB(EntanglementProtocol, ABC):
 
     def set_others(self, protocol: str, node: str, memories: list[str]) -> None:
         """Method to set other entanglement protocol instance.
+
+        Note:
+            ``memories`` is intentionally unused; swapping uses the memos it
+            already holds. Kept for interface compatibility.
 
         Args:
             protocol (str): other protocol name.
