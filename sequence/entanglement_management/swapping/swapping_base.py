@@ -129,7 +129,8 @@ class EntanglementSwappingA(EntanglementProtocol, ABC):
 
         Args:
             name (str): name of the specific type of Entanglement Swapping A protocol.
-            protocol_class (type[EntanglementSwappingA] | None): the class of the specific type of Entanglement Swapping A protocol. If None, the decorated class will be registered.
+            protocol_class (type[EntanglementSwappingA] | None): the class of the specific type of Entanglement 
+                                                Swapping A protocol. If None, the decorated class will be registered.
 
         Returns:
             If protocol_class is None, returns a decorator function. Otherwise, returns None.
@@ -318,7 +319,8 @@ class EntanglementSwappingB(EntanglementProtocol, ABC):
 
         Args:
             name (str): name of the specific type of Entanglement Swapping B protocol.
-            protocol_class (type[EntanglementSwappingB] | None): the class of the specific type of Entanglement Swapping B protocol. If None, the decorated class will be registered.
+            protocol_class (type[EntanglementSwappingB] | None): the class of the specific type of 
+                                Entanglement Swapping B protocol. If None, the decorated class will be registered.
 
         Returns:
             If protocol_class is None, returns a decorator function. Otherwise, returns None.
